@@ -33,14 +33,37 @@ user_data = dict(
 
 # ---------------------------- PROMPT ----------------------------
 SYSTEM_PROMPT = """
-You are TRAILMIX, a precise AI meal planner.
+You are TRAILMIX, a precise and practical AI meal planner.
 
-• Always produce 7 days (Breakfast, Lunch, Dinner).
-• Give ingredients with metric quantities.
-• Approximate calories for each meal realistically.
-• Keep meals simple and affordable.
-• Respect dietary restrictions and diet type.
-• Output valid JSON only.
+Your output must be VALID JSON ONLY.
+
+Include:
+- A 7-day meal plan with Breakfast, Lunch, and Dinner.
+- Each meal includes: name, ingredients (as dict), calories, and a short recipe (2–3 sentences).
+- Total calories per day should match the user's target within ±5%.
+- A grocery_list section that combines all ingredients by item name, summed quantities, and category.
+- A summary with total weekly calories and estimated cost.
+
+Example structure:
+{
+  "meal_plan": {
+    "day_1": {
+      "breakfast": {"meal": "...", "ingredients": {...}, "calories": 500, "recipe": "..."},
+      "lunch": {...},
+      "dinner": {...}
+    },
+    ...
+  },
+  "grocery_list": [
+    {"item": "chicken breast", "quantity": "1.2 kg", "category": "protein"},
+    ...
+  ],
+  "summary": {
+    "average_daily_calories": 2400,
+    "estimated_weekly_cost": "80 CHF",
+    "nutrition_focus": "high protein, balanced carbs"
+  }
+}
 """
 
 openai.api_key = 
@@ -103,21 +126,15 @@ if st.button("Generate My Weekly Plan 🧑‍🍳"):
                 ],
                 temperature=0.6,
             )
+
             raw = response.choices[0].message.content.strip()
-
-            # --- DEBUG: print the start of the model output
-            st.info("🧩 DEBUG: First 300 characters of model output")
-            st.code(raw[:300])
-
-            # --- CLEAN MARKDOWN FENCES
             raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
-
-            # --- TRY TO PARSE
             plan = json.loads(raw)
 
             target = user_data["daily_calories"]
             days = normalize_mealplan(plan.get("meal_plan"))
 
+            # ✅ Weekly plan
             st.success("✅ Your personalized plan is ready!")
             st.header("Your Weekly Meal Plan 🍲")
 
@@ -131,8 +148,9 @@ if st.button("Generate My Weekly Plan 🧑‍🍳"):
                     if m not in day_dict:
                         continue
                     meal = day_dict[m]
-                    name = meal.get("meal") or meal.get("name") or meal.get("description") or m
+                    name = meal.get("meal") or meal.get("name") or m
                     st.markdown(f"**{m.capitalize()} – {name}**")
+
                     ings = meal.get("ingredients", {})
                     if isinstance(ings, dict):
                         for ing_name, qty in ings.items():
@@ -141,14 +159,26 @@ if st.button("Generate My Weekly Plan 🧑‍🍳"):
                         for ing in ings:
                             st.write(f"- {ing.get('item','?')}: {ing.get('quantity','?')}")
                     st.caption(f"~{meal.get('calories','?')} kcal")
+                    if "recipe" in meal:
+                        st.markdown(f"🧑‍🍳 *Recipe:* {meal['recipe']}")
                 st.markdown("---")
 
+            # ✅ Grocery List
+            grocery = plan.get("grocery_list", [])
+            if grocery:
+                st.header("🛒 Grocery List")
+                for g in grocery:
+                    item = g.get("item", "?")
+                    qty = g.get("quantity", "?")
+                    cat = g.get("category", "?")
+                    st.write(f"- **{item}** ({cat}) — {qty}")
+
+            # ✅ Summary
             st.header("📋 Summary")
-            st.write(f"**Estimated total weekly calories:** {plan.get('total_calories', '?')} kcal")
-            st.write(f"**Estimated weekly cost:** {plan.get('total_budget', plan.get('estimated_weekly_cost','?'))}")
+            summary = plan.get("summary", {})
+            st.write(f"**Average daily calories:** {summary.get('average_daily_calories', '?')} kcal")
+            st.write(f"**Estimated weekly cost:** {summary.get('estimated_weekly_cost', '?')}")
+            st.write(f"**Nutrition focus:** {summary.get('nutrition_focus', '?')}")
 
         except Exception as e:
-            # --- DEBUGGING ERROR OUTPUT
-            st.error(f"⚠️ Parsing failed: {type(e).__name__} – {e}")
-            st.info("🧩 RAW MODEL OUTPUT BELOW:")
-            st.code(raw, language="json")
+            st.error(f"⚠️ Error: {type(e).__name__} – {e}")
