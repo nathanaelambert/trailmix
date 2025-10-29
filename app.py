@@ -114,9 +114,9 @@ app.layout = html.Div([
         html.Label("Weight (kg)"),
         dcc.Slider(
           id="body_weight",
-          min=0, max=300, step=1,
+          min=0, max=200, step=1,
             value=69,
-            marks={i: str(i) for i in range(0, 301, 20)},
+            marks={i: str(i) for i in range(0, 201, 20)},
             tooltip={"placement": "bottom"},
             updatemode='drag',
         ),
@@ -125,9 +125,9 @@ app.layout = html.Div([
         html.Div(
           dcc.Slider(
               id='budget',
-              min=0, max=300, step=1,
+              min=0, max=200, step=1,
               value=80,
-              marks={i: str(i) for i in range(0, 301, 20)},
+              marks={i: str(i) for i in range(0, 201, 20)},
               tooltip={"placement": "bottom"},
               updatemode='drag',
           ),
