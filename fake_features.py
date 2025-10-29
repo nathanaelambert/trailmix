@@ -9,6 +9,7 @@ def inject_google_analytics():
     GA_stream_id = 12364028308
     GA_measurement_id = "G-ETT9HS0JXE"
     GA_JS = """
+    <!-- Google tag (gtag.js) injected-->
     <script async src="https://www.googletagmanager.com/gtag/js?id=G-ETT9HS0JXE"></script>
     <script>
         window.dataLayer = window.dataLayer || [];
