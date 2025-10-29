@@ -56,6 +56,15 @@ def show_recipe():
 if st.button("Generate Recipe", on_click=show_recipe):
     pass  # The callback updates session state
 
+st.button("Click me!", on_click=st.write("""
+<script>
+gtag(‘event‘, ‘button_click‘, {
+  ‘event_category‘ : ‘engagement‘,
+  ‘event_label‘ : ‘my_button‘
+});
+</script>
+"""), args=None, kwargs=None)
+
 # Show recipe and extra buttons only after main button clicked
 if st.session_state.recipe_shown:
     st.subheader("Your Recipe")
