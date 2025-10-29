@@ -37,6 +37,21 @@ app.index_string = """
       function gtag(){dataLayer.push(arguments);}
       gtag('js', new Date());
       gtag('config', 'G-3R4901JN3H');
+
+      document.addEventListener('click', function(event) {
+        var elem = event.target;
+        var elementInfo = elem.tagName;
+        if (elem.id) elementInfo += ' #' + elem.id;
+        if (elem.className) elementInfo += ' .' + elem.className.toString().replace(/\s+/g, '.');
+        var timestamp = new Date().toISOString();
+
+        gtag('event', 'user_click', {
+            'event_category': 'User Interaction',
+            'event_label': elementInfo,
+            'event_timestamp': timestamp
+        });
+      });
+
     </script>
     {%metas%}
     <title>{%title%}</title>
