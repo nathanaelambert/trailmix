@@ -97,27 +97,54 @@ app.layout = html.Div([
 
     html.Div([
         html.Label("Weight (kg)"),
-        dcc.Input(id="body_weight", type="number", value=70, style={"width": "100%", "marginBottom": "10px"}),
-
-        html.Label("Weekly food budget (CHF)"),
         dcc.Slider(
-            id='budget',
-            min=0, max=200, step=1,
-            value=80,
-            marks={i: str(i) for i in range(0, 201, 20)},
+          id="body_weight",
+          min=0, max=300, step=1,
+            value=69,
+            marks={i: str(i) for i in range(0, 301, 20)},
             tooltip={"placement": "bottom"},
             updatemode='drag',
         ),
+
+        html.Label("Weekly food budget (CHF)"),
+        html.Div(
+          dcc.Slider(
+              id='budget',
+              min=0, max=300, step=1,
+              value=80,
+              marks={i: str(i) for i in range(0, 301, 20)},
+              tooltip={"placement": "bottom"},
+              updatemode='drag',
+          ),
+          id="budget_slider_container"
+        ),
         dcc.Checklist(
-            options=[{"label": "ignore for now", "value": "ignore"}],
+            options=[{"label": "Ignore for now", "value": "ignore"}],
             value=[],
             id="budget_ignore",
             style={"marginBottom": "20px"}
         ),
 
         html.Label("Target (Calories/day)"),
-        dcc.Input(id="daily_calories", type="number", value=2400, style={"width": "100%", "marginBottom": "20px"}),
+        html.Div(
+          dcc.Slider(
+              id='dayly_calories',
+              min=0, max=5000, step=5,
+              value=2400,
+              marks={i: str(i) for i in range(0, 5001, 500)},
+              tooltip={"placement": "bottom"},
+              updatemode='drag',
+          ),
+          id="calories_slider_container"
 
+        ),
+        dcc.Checklist(
+            options=[{"label": "Compute for me", "value": "ignore"}],
+            value=[],
+            id="calories_ignore",
+            style={"marginBottom": "20px"}
+        ),
+        
         html.Label("Activity level"),
         dcc.Dropdown(["Sedentary","Lightly active","Moderately active","Very active","Extra active"],
                      "Moderately active", id="activity", style={"marginBottom": "20px"}),
@@ -126,8 +153,8 @@ app.layout = html.Div([
         dcc.Dropdown(["Omnivore","Vegetarian","Keto","Vegan","Pescatarian","Gluten free","Other"],
                      "Omnivore", id="diet_type", style={"marginBottom": "20px"}),
 
-        html.Label("Location (e.g. Lausanne)"),
-        dcc.Input(id="location", placeholder="Location (e.g. Lausanne)", value="Lausanne", style={"width": "100%", "marginBottom": "20px"}),
+        html.Label("Location"),
+        dcc.Input(id="location", placeholder="Lausanne", style={"width": "100%", "marginBottom": "20px"}),
 
         html.Label("Your goals (multi-select)"),
         dcc.Dropdown(
@@ -140,7 +167,7 @@ app.layout = html.Div([
         ),
 
         html.Label("Any dietary restrictions or allergies?"),
-        dcc.Textarea(id="restrictions", placeholder="Any dietary restrictions or allergies?", style={"width": "100%", "height": "80px", "marginBottom": "20px"}),
+        dcc.Textarea(id="restrictions", placeholder="egg, peanut", style={"width": "100%", "height": "80px", "marginBottom": "20px"}),
 
         html.Button("Generate My Weekly Plan 🧑‍🍳", id="generate", n_clicks=0, style={"backgroundColor": "#28a745", "color": "white", "border": "none", "padding": "10px 15px", "borderRadius": "5px"}),
     ], style={"maxWidth": "600px", "margin": "auto"}),
@@ -151,6 +178,26 @@ app.layout = html.Div([
 # (Keep your helper functions numeric_scale, rescale_day, normalize_mealplan unchanged here)
 
 # -------------------- CALLBACK --------------------
+@app.callback(
+    Output("budget_slider_container", "style"),
+    Input("budget_ignore", "value")
+)
+def toggle_budget_visibility(ignore_values):
+    if "ignore" in ignore_values:
+        return {"display": "none"}
+    else:
+        return {"display": "block"}
+
+@app.callback(
+    Output("calories_slider_container", "style"),
+    Input("calories_ignore", "value")
+)
+def toggle_calories_visibility(ignore_values):
+    if "ignore" in ignore_values:
+        return {"display": "none"}
+    else:
+        return {"display": "block"}
+
 @app.callback(
     Output("plan_output", "children"),
     Input("generate", "n_clicks"),
