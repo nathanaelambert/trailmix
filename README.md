@@ -1,5 +1,5 @@
-# TRAILMIX
-TR**AI**LMIX is an AI powered meal planning app focused on recommending **healthy** recipes, adapting plans to personal needs and health **goals**, integrating **local** retailers, while **reducing food waste**.
+# CULINAIRE
+CULIN**AI**RE is an AI powered meal planning app focused on recommending **healthy** recipes, adapting plans to personal needs and health **goals**, integrating **local** retailers, while **reducing food waste**.
 
 ## Initial setup for devs
 1. clone git repo
@@ -11,5 +11,5 @@ TR**AI**LMIX is an AI powered meal planning app focused on recommending **health
 ```pip install -r requirements.txt```
 
 ## How to run the app for testing
-```streamlit run trailmix.py```
+```python main.py```
 
