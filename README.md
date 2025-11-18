@@ -11,5 +11,5 @@ CULIN**AI**RE is an AI powered meal planning app focused on recommending **healt
 ```pip install -r requirements.txt```
 
 ## How to run the app for testing
-```python main.py```
+```python app.py```
 
