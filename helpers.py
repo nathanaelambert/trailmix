@@ -40,17 +40,21 @@ def create_recipe_widget(recipe: Recipe):
         ingredient_squares.append(
             html.Div([
                 html.Div(ing.name, style={"fontWeight": "bold"}),
-                html.Div(f"{ing.amount} {ing.amount_type}")
+                html.Div(f"{ing.amount} {ing.amount_type}"),
+                dbc.Button("Order", id=f"order_{ing.name}", color="secondary", size="sm", n_clicks=0, style={"marginBottom": "5px", "float": "right"}),
+
             ], style={
-                "backgroundColor": "#d0e1f9",
+                "backgroundColor": "white",
                 "borderRadius": "6px",
-                "textAlign": "center",
-                "padding": "5px",
+                "border": "1px solid grey",
+                "textAlign": "left",
+                "padding": "10px",
                 "margin": "5px",
-                "width": "90px",
+                "width": "260px",
                 "display": "inline-block",
                 "verticalAlign": "top",
-                "fontSize": "14px"
+                "fontSize": "14px",
+                
             })
         )
     # Create expandable steps section with a collapsible toggle
@@ -66,7 +70,7 @@ def create_recipe_widget(recipe: Recipe):
             ], style={"display": "flex", "marginBottom": "10px"}),
             html.Div(ingredient_squares, style={"display": "flex", "flexWrap": "wrap", "marginBottom": "10px"}),
             # Collapsible steps
-            dbc.Button("Show/Hide Steps", id=f"toggle-{steps_id}", color="primary", size="sm", n_clicks=0, style={"marginBottom": "5px"}),
+            dbc.Button("Show/Hide Steps", id=f"toggle-{steps_id}", color="secondary", size="sm", n_clicks=0, style={"marginBottom": "5px"}),
             dbc.Collapse(
                 html.Ol([html.Li(step) for step in recipe.steps]),
                 id=steps_id,
@@ -78,5 +82,5 @@ def create_recipe_widget(recipe: Recipe):
                 *[html.Span("☆", id=f"{rate_id}-star-{i}", style={"cursor": "pointer", "fontSize": "20px", "color": "#ccc"}) for i in range(1,6)]
             ], style={"marginTop": "10px"}),
         ]),
-    ], style={"borderRadius": "15px", "marginBottom": "20px", "padding": "10px"})
+    ], style={"borderRadius": "15px", "border": "1px solid grey", "marginBottom": "20px", "padding": "10px"})
 

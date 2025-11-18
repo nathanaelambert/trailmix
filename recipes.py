@@ -83,7 +83,7 @@ sample_recipes = [
             Ingredient("Brown Rice (dry)", 70, "g"),
             Ingredient("Bell Pepper", 60, "g"),
             Ingredient("Carrot", 50, "g"),
-            Ingredient("Soy Sauce (reduced salt)", 10, "g"),
+            Ingredient("Soy Sauce", 10, "g"),
             Ingredient("Olive Oil", 8, "g"),
         ],
         [
