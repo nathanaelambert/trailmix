@@ -1,5 +1,8 @@
 from dash import Dash, Input, Output, State, html, dcc
+from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
+import os
+from dotenv import load_dotenv
 
 app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
 
@@ -7,6 +10,7 @@ app.title = "CULINAIRE 🥗"
 
 from layout import layout
 app.layout = layout
+load_dotenv()  # load env vars from .env if present
 
 # -------------------- GOOGLE ANALYTICS --------------------
 
@@ -56,21 +60,97 @@ app.index_string = """
 # ---------------------Callbacks ---------------
 from recipes import sample_recipes, days, meal_times
 from helpers import rescale_day, normalize_mealplan, create_recipe_widget
-import json, re, openai
+import json, re
+from openai import OpenAI
 
-openai.api_key = "YOUR_OPENAI_KEY"
+api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise RuntimeError("Please set OPENROUTER_API_KEY (or OPENAI_API_KEY) for the meal planner.")
+
+default_headers = {"X-Title": os.getenv("OPENROUTER_APP_TITLE", "CULINAIRE")}
+if os.getenv("OPENROUTER_SITE_URL"):
+    default_headers["HTTP-Referer"] = os.getenv("OPENROUTER_SITE_URL")
+
+base_url = (
+    os.getenv("OPENROUTER_BASE_URL")
+    or os.getenv("OPENAI_API_BASE")
+    or os.getenv("OPENAI_BASE_URL")
+    or "https://openrouter.ai/api/v1"
+)
+
+client = OpenAI(
+    base_url=base_url,
+    api_key=api_key,
+    default_headers=default_headers,
+)
+
+def extract_json_block(raw_text: str) -> str:
+    """Try to pull a JSON object out of a model response."""
+    if raw_text is None:
+        return ""
+    if not isinstance(raw_text, str):
+        try:
+            return json.dumps(raw_text)
+        except Exception:
+            raw_text = str(raw_text)
+    if not raw_text:
+        return ""
+
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", raw_text, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        candidate = fenced.group(1).strip()
+        if candidate:
+            return candidate
+
+    trimmed = raw_text.strip()
+    if trimmed.startswith("{") and trimmed.endswith("}"):
+        return trimmed
+
+    brace = re.search(r"\{.*\}", trimmed, re.DOTALL)
+    if brace:
+        return brace.group(0).strip()
+
+    return trimmed
+
+
+def clean_json_text(raw_text: str) -> str:
+    """Light cleanup for common JSON mistakes (trailing commas, smart quotes)."""
+    if raw_text is None:
+        return ""
+    if not isinstance(raw_text, str):
+        try:
+            raw_text = json.dumps(raw_text)
+        except Exception:
+            raw_text = str(raw_text)
+    txt = raw_text
+    # Replace smart quotes with regular quotes
+    txt = txt.replace("“", "\"").replace("”", "\"")
+    # Remove trailing commas before closing braces/brackets
+    txt = re.sub(r",\s*([}\]])", r"\1", txt)
+    return txt
 
 SYSTEM_PROMPT = """
 You are CULINAIRE, a precise and practical AI meal planner.
 
 Your output must be VALID JSON ONLY.
+Return a single JSON object with no code fences, markdown, or commentary.
 
 Include:
-- A 7-day meal plan with Breakfast, Lunch, and Dinner.
-- Each meal includes: name, ingredients (as dict), calories, and a short recipe (2–3 sentences).
+- A 7-day meal plan with Breakfast, Lunch, and Dinner for EVERY day.
+- Keys for each meal must be lowercase: breakfast, lunch, dinner.
+- Each meal includes: meal (name), ingredients (as dict), calories (number), and a short recipe (1 sentence).
 - Total calories per day should match the user's target within ±5%.
 - A grocery_list section that combines all ingredients by item name, summed quantities, and category.
 - A summary with total weekly calories and estimated cost.
+- Do not use placeholder values like "None", "?", or "N/A". Provide realistic items and quantities.
+- Grocery list entries must have item, category, and quantity; category should be something like Produce, Dairy, Meat, Pantry, Bakery, Frozen, Beverages, etc.
+
+Recipe description style (for the recipe field):
+- Describe only what is visibly present; do not mention anything unidentifiable.
+- Include color features (dominant colors; interwoven vs. unified), shape/texture (shredded, granular, smooth, rough), spatial arrangement (mixed, stacked, layered, wrapped), and fusion state (distinguishable, fully fused, placed on top).
+- Start with a step number (1., 2., etc.) and keep it to one sentence on one line.
+- Choose one interaction type and weave it into the sentence: Mix up, Blend, Put on, Cover, or No relationship.
+- Avoid extra commentary; keep it concise and vivid.
 """
 
 @app.callback(
@@ -93,6 +173,63 @@ def toggle_calories_visibility(ignore_values):
     else:
         return {"display": "block"}
 
+def load_plan(json_text: str) -> dict:
+    """Load JSON and normalize nested string JSON."""
+    obj = json.loads(json_text)
+    if isinstance(obj, str):
+        obj = json.loads(obj)
+    if not isinstance(obj, dict):
+        raise ValueError("Meal plan response must be a JSON object")
+    return obj
+
+
+def render_plan_view(plan: dict, target: float):
+    days = normalize_mealplan(plan.get("meal_plan"))
+    blocks = []
+
+    blocks.append(html.H3("Your Weekly Meal Plan 🍲"))
+    day_totals = []
+    for day_name, day_dict in days:
+        if not isinstance(day_dict, dict):
+            continue
+        day_dict = rescale_day(day_dict, target)
+        total = sum(day_dict[m].get("calories",0) for m in ["breakfast","lunch","dinner"] if m in day_dict)
+        day_totals.append(total)
+        meals_section = [html.H4(f"{day_name} — {round(total)} kcal (Target: {target})")]
+        for m in ["breakfast","lunch","dinner"]:
+            if m not in day_dict: continue
+            meal = day_dict[m]
+            meals_section.append(html.H5(f"{m.capitalize()} – {meal.get('meal', m)}"))
+            ing_list = [html.Li(f"{k}: {v}") for k,v in meal.get("ingredients", {}).items()]
+            meals_section.append(html.Ul(ing_list))
+            meals_section.append(html.P(f"{meal.get('recipe','')} (~{meal.get('calories','?')} kcal)"))
+        blocks.extend(meals_section)
+        blocks.append(html.Hr())
+
+    grocery = plan.get("grocery_list") or []
+    if isinstance(grocery, dict):
+        grocery = list(grocery.values())
+    if grocery:
+        blocks.append(html.H3("🛒 Grocery List"))
+        blocks.extend(
+            html.Li(f"{g.get('item')} ({g.get('category')}): {g.get('quantity')}")
+            for g in grocery
+            if isinstance(g, dict) and g.get("item")
+        )
+
+    summary = plan.get("summary") or {}
+    if not isinstance(summary, dict):
+        summary = {}
+    if not summary.get("average_daily_calories") and day_totals:
+        summary["average_daily_calories"] = round(sum(day_totals)/len(day_totals))
+    blocks.append(html.H3("📋 Summary"))
+    blocks.append(html.P(f"Average daily calories: {summary.get('average_daily_calories','?')} kcal"))
+    blocks.append(html.P(f"Estimated weekly cost: {summary.get('estimated_weekly_cost','?')}"))
+    blocks.append(html.P(f"Nutrition focus: {summary.get('nutrition_focus','?')}"))
+
+    return html.Div(blocks)
+
+
 def generate_plan(n, weight, activity, goals, budget, calories, restrictions, diet, location):
     user_prompt = f"""
     Create a 7-day meal plan for:
@@ -106,49 +243,71 @@ def generate_plan(n, weight, activity, goals, budget, calories, restrictions, di
     - Location: {location}
     """
 
+    raw_content = ""
+    json_text = ""
     try:
-        response = openai.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role":"system","content":SYSTEM_PROMPT},
                       {"role":"user","content":user_prompt}],
-            temperature=0.6,
+            response_format={"type": "json_object"},
         )
-        raw = response.choices[0].message.content.strip()
-        raw = re.sub(r"^``````$", "", raw.strip(), flags=re.MULTILINE)
-        plan = json.loads(raw)
-        days = normalize_mealplan(plan.get("meal_plan"))
-        target = calories
-        blocks = []
+        raw_content = (response.choices[0].message.content or "").strip()
+        json_text = extract_json_block(raw_content)
+        plan = load_plan(json_text)
+        return render_plan_view(plan, calories)
+    except json.JSONDecodeError as je:
+        cleaned_text = clean_json_text(json_text)
+        if cleaned_text != json_text:
+            try:
+                plan = load_plan(cleaned_text)
+                return render_plan_view(plan, calories)
+            except json.JSONDecodeError:
+                pass
 
-        blocks.append(html.H3("Your Weekly Meal Plan 🍲"))
-        for day_name, day_dict in days:
-            day_dict = rescale_day(day_dict, target)
-            total = sum(day_dict[m].get("calories",0) for m in ["breakfast","lunch","dinner"] if m in day_dict)
-            meals_section = [html.H4(f"{day_name} — {round(total)} kcal (Target: {target})")]
-            for m in ["breakfast","lunch","dinner"]:
-                if m not in day_dict: continue
-                meal = day_dict[m]
-                meals_section.append(html.H5(f"{m.capitalize()} – {meal.get('meal', m)}"))
-                ing_list = [html.Li(f"{k}: {v}") for k,v in meal.get("ingredients", {}).items()]
-                meals_section.append(html.Ul(ing_list))
-                meals_section.append(html.P(f"{meal.get('recipe','')} (~{meal.get('calories','?')} kcal)"))
-            blocks.extend(meals_section)
-            blocks.append(html.Hr())
-
-        grocery = plan.get("grocery_list", [])
-        if grocery:
-            blocks.append(html.H3("🛒 Grocery List"))
-            blocks.extend(html.Li(f"{g.get('item')} ({g.get('category')}): {g.get('quantity')}") for g in grocery)
-
-        summary = plan.get("summary", {})
-        blocks.append(html.H3("📋 Summary"))
-        blocks.append(html.P(f"Average daily calories: {summary.get('average_daily_calories','?')} kcal"))
-        blocks.append(html.P(f"Estimated weekly cost: {summary.get('estimated_weekly_cost','?')}"))
-        blocks.append(html.P(f"Nutrition focus: {summary.get('nutrition_focus','?')}"))
-
-        return html.Div(blocks)
+        snippet = (raw_content or cleaned_text or "")[:1000]
+        return html.Div(
+            [
+                html.P(f"Error: JSON parsing failed – {je}", style={"color": "red", "fontWeight": "bold"}),
+                html.Pre(snippet, style={"whiteSpace": "pre-wrap", "background": "#f8f9fa", "padding": "10px"}),
+            ]
+        )
     except Exception as e:
         return html.Div(f"Error: {type(e).__name__} – {e}", style={"color": "red"})
+
+
+@app.callback(
+    Output("plan_output", "children"),
+    Input("generate", "n_clicks"),
+    State("body_weight", "value"),
+    State("activity", "value"),
+    State("goals", "value"),
+    State("budget", "value"),
+    State("dayly_calories", "value"),
+    State("restrictions", "value"),
+    State("diet_type", "value"),
+    State("location", "value"),
+    State("budget_ignore", "value"),
+    State("calories_ignore", "value"),
+)
+def handle_generate_plan(n_clicks, weight, activity, goals, budget, calories, restrictions, diet, location, budget_ignore, calories_ignore):
+    if not n_clicks:
+        raise PreventUpdate
+
+    budget_value = budget if "ignore" not in (budget_ignore or []) else "Not specified"
+    calorie_target = calories if "ignore" not in (calories_ignore or []) else 2400
+
+    return generate_plan(
+        n_clicks,
+        weight,
+        activity,
+        goals or [],
+        budget_value,
+        calorie_target,
+        restrictions or "None",
+        diet,
+        location or "Not specified",
+    )
 
 @app.callback(
     Output("test_recipes_output", "children"),

@@ -1,17 +1,24 @@
 from recipes import Recipe
 from dash import html, dcc
 import dash_bootstrap_components as dbc
+import re
 
 
 
 def numeric_scale(qty, scale):
-    nums = re.findall(r"[0-9]+\\.?[0-9]*", qty)
-    if not nums:
+    if qty is None:
         return qty
+    if isinstance(qty, (int, float)):
+        return round(float(qty) * scale, 2)
+
+    qty_str = str(qty)
+    nums = re.findall(r"[0-9]+\\.?[0-9]*", qty_str)
+    if not nums:
+        return qty_str
     for num in nums:
         new_val = round(float(num) * scale, 1)
-        qty = qty.replace(num, str(new_val), 1)
-    return qty
+        qty_str = qty_str.replace(num, str(new_val), 1)
+    return qty_str
 
 def rescale_day(day_dict, target):
     meals = ["breakfast","lunch","dinner"]
@@ -28,10 +35,53 @@ def rescale_day(day_dict, target):
 
 def normalize_mealplan(mp):
     if isinstance(mp, list):
-        return [(d.get("day", f"Day {i+1}"), d.get("meals", d)) for i, d in enumerate(mp)]
-    if isinstance(mp, dict):
-        return [(k.replace("_", " ").title(), v) for k,v in mp.items()]
-    return []
+        pairs = [(d.get("day", f"Day {i+1}"), d.get("meals", d)) for i, d in enumerate(mp)]
+    elif isinstance(mp, dict):
+        pairs = [(k.replace("_", " ").title(), v) for k,v in mp.items()]
+    else:
+        return []
+
+    normalized = []
+    for day_name, meals in pairs:
+        normalized.append((day_name, normalize_day_structure(meals)))
+    return normalized
+
+
+def normalize_meal_entry(meal, fallback_name):
+    if not isinstance(meal, dict):
+        return {}
+    cleaned = dict(meal)
+    cleaned["meal"] = cleaned.get("meal") or cleaned.get("name") or fallback_name.title()
+    # Normalize calories to a number
+    cal_val = cleaned.get("calories", 0)
+    try:
+        cal_val = float(cal_val)
+    except (TypeError, ValueError):
+        cal_val = 0
+    cleaned["calories"] = cal_val
+
+    # Ensure ingredients is a dict
+    ingredients = cleaned.get("ingredients", {})
+    if isinstance(ingredients, list):
+        ing_dict = {}
+        for ing in ingredients:
+            if isinstance(ing, dict) and "item" in ing and "quantity" in ing:
+                ing_dict[ing["item"]] = ing["quantity"]
+        ingredients = ing_dict
+    if not isinstance(ingredients, dict):
+        ingredients = {}
+    cleaned["ingredients"] = ingredients
+    return cleaned
+
+
+def normalize_day_structure(day_dict):
+    if not isinstance(day_dict, dict):
+        return {}
+    normalized = {}
+    for meal_name, meal in day_dict.items():
+        key = str(meal_name).lower().strip()
+        normalized[key] = normalize_meal_entry(meal, key)
+    return normalized
 
 
 def create_recipe_widget(recipe: Recipe):
@@ -83,4 +133,3 @@ def create_recipe_widget(recipe: Recipe):
             ], style={"marginTop": "10px"}),
         ]),
     ], style={"borderRadius": "15px", "border": "1px solid grey", "marginBottom": "20px", "padding": "10px"})
-
