@@ -1,4 +1,4 @@
-from dash import Dash, Input, Output, State, html, dcc
+from dash import Dash, Input, Output, State, html, dcc, callback_context
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 import os
@@ -62,6 +62,7 @@ from recipes import sample_recipes, days, meal_times
 from helpers import rescale_day, normalize_mealplan, create_recipe_widget
 import json, re
 from openai import OpenAI
+from functools import lru_cache
 
 api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
 if not api_key:
@@ -83,6 +84,18 @@ client = OpenAI(
     api_key=api_key,
     default_headers=default_headers,
 )
+
+@lru_cache(maxsize=1)
+def get_hf_pipeline():
+    """Lazy-load the Hugging Face recipe generator pipeline."""
+    try:
+        from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+    except ImportError:
+        raise RuntimeError("transformers is required for the HuggingFace model. Please pip install transformers.")
+
+    tokenizer = AutoTokenizer.from_pretrained("Ashikan/dut-recipe-generator")
+    model = AutoModelForCausalLM.from_pretrained("Ashikan/dut-recipe-generator")
+    return pipeline("text-generation", model=model, tokenizer=tokenizer)
 
 def extract_json_block(raw_text: str) -> str:
     """Try to pull a JSON object out of a model response."""
@@ -106,9 +119,22 @@ def extract_json_block(raw_text: str) -> str:
     if trimmed.startswith("{") and trimmed.endswith("}"):
         return trimmed
 
-    brace = re.search(r"\{.*\}", trimmed, re.DOTALL)
-    if brace:
-        return brace.group(0).strip()
+    # Prefer the first valid-looking JSON object; if multiple, take the first complete
+    for m in re.finditer(r"\{.*\}", trimmed, re.DOTALL):
+        candidate = m.group(0).strip()
+        # quick heuristic: balanced braces
+        if candidate.count("{") == candidate.count("}"):
+            return candidate
+
+    # If we got here, try to slice from first '{' to last '}'
+    first_open = trimmed.find("{")
+    last_close = trimmed.rfind("}")
+    if first_open != -1 and last_close != -1 and last_close > first_open:
+        return trimmed[first_open : last_close + 1].strip()
+
+    # As a last resort, try to truncate at the last closing brace
+    if last_close != -1:
+        return trimmed[: last_close + 1]
 
     return trimmed
 
@@ -276,9 +302,65 @@ def generate_plan(n, weight, activity, goals, budget, calories, restrictions, di
         return html.Div(f"Error: {type(e).__name__} – {e}", style={"color": "red"})
 
 
+def generate_plan_hf(n, weight, activity, goals, budget, calories, restrictions, diet, location):
+    user_prompt = f"""
+    You are CULINAIRE. Create a 7-day meal plan as pure JSON only.
+    Do NOT include the prompt or any text outside the JSON. No ellipses.
+    - Body weight: {weight} kg
+    - Activity: {activity}
+    - Goals: {', '.join(goals or [])}
+    - Diet: {diet}
+    - Restrictions: {restrictions or 'None'}
+    - Target calories: {calories} kcal/day
+    - Budget: {budget} CHF
+    - Location: {location}
+
+    Return exactly this shape (no extra keys):
+    {{
+      "meal_plan": [
+        {{"day": "Monday", "meals": {{"breakfast": {{}}, "lunch": {{}}, "dinner": {{}}}}}},
+        {{"day": "Tuesday", "meals": {{"breakfast": {{}}, "lunch": {{}}, "dinner": {{}}}}}},
+        {{"day": "Wednesday", "meals": {{"breakfast": {{}}, "lunch": {{}}, "dinner": {{}}}}}},
+        {{"day": "Thursday", "meals": {{"breakfast": {{}}, "lunch": {{}}, "dinner": {{}}}}}},
+        {{"day": "Friday", "meals": {{"breakfast": {{}}, "lunch": {{}}, "dinner": {{}}}}}},
+        {{"day": "Saturday", "meals": {{"breakfast": {{}}, "lunch": {{}}, "dinner": {{}}}}}},
+        {{"day": "Sunday", "meals": {{"breakfast": {{}}, "lunch": {{}}, "dinner": {{}}}}}}
+      ],
+      "grocery_list": [{{"item": "Bananas", "quantity": "6", "category": "Produce"}}],
+      "summary": {{"average_daily_calories": 0, "estimated_weekly_cost": "CHF 0", "nutrition_focus": "balanced"}}
+    }}
+    Each meal object must include: "meal", "ingredients" (dict), "calories" (number), "recipe" (1 sentence).
+    Make calorie totals close to target.
+    """
+    raw_content = ""
+    json_text = ""
+    try:
+        pipe = get_hf_pipeline()
+        raw_output = pipe(
+            user_prompt,
+            max_length=900,
+            temperature=0.2,
+            do_sample=True,
+            truncation=True,
+            return_full_text=False,
+        )[0]
+        raw_content = raw_output.get("generated_text") or ""
+        json_text = extract_json_block(raw_content)
+        plan = load_plan(json_text)
+        return render_plan_view(plan, calories)
+    except Exception as e:
+        return html.Div(
+            [
+                html.P(f"Error using HuggingFace model: {type(e).__name__} – {e}", style={"color": "red", "fontWeight": "bold"}),
+                html.Pre((raw_content or "")[:800], style={"whiteSpace": "pre-wrap", "background": "#f8f9fa", "padding": "10px"}),
+            ]
+        )
+
+
 @app.callback(
     Output("plan_output", "children"),
     Input("generate", "n_clicks"),
+    Input("generate_hf", "n_clicks"),
     State("body_weight", "value"),
     State("activity", "value"),
     State("goals", "value"),
@@ -290,12 +372,28 @@ def generate_plan(n, weight, activity, goals, budget, calories, restrictions, di
     State("budget_ignore", "value"),
     State("calories_ignore", "value"),
 )
-def handle_generate_plan(n_clicks, weight, activity, goals, budget, calories, restrictions, diet, location, budget_ignore, calories_ignore):
-    if not n_clicks:
+def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity, goals, budget, calories, restrictions, diet, location, budget_ignore, calories_ignore):
+    if not n_clicks and not n_clicks_hf:
         raise PreventUpdate
+
+    ctx = callback_context
+    trigger = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
 
     budget_value = budget if "ignore" not in (budget_ignore or []) else "Not specified"
     calorie_target = calories if "ignore" not in (calories_ignore or []) else 2400
+
+    if trigger == "generate_hf":
+        return generate_plan_hf(
+            n_clicks_hf,
+            weight,
+            activity,
+            goals or [],
+            budget_value,
+            calorie_target,
+            restrictions or "None",
+            diet,
+            location or "Not specified",
+        )
 
     return generate_plan(
         n_clicks,

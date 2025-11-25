@@ -86,6 +86,14 @@ layout = html.Div([
         dcc.Textarea(id="restrictions", placeholder="egg, peanut", style={"width": "100%", "height": "80px", "marginBottom": "20px"}),
 
         html.Button("Generate My Weekly Plan 🧑‍🍳", id="generate", n_clicks=0, style={"backgroundColor": "#28a745", "color": "white", "border": "none", "padding": "10px 15px", "borderRadius": "5px"}),
+        html.Button("Generate with HuggingFace 🤗", id="generate_hf", n_clicks=0, style={
+            "backgroundColor": "#6f42c1",
+            "color": "white",
+            "border": "none",
+            "padding": "10px 15px",
+            "borderRadius": "5px",
+            "marginLeft": "10px"
+        }),
         html.Button("Test Recipes", id="test_recipes", n_clicks=0, style={
             "backgroundColor": "#007bff",
             "color": "white",
