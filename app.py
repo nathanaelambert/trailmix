@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 import requests
 from duckduckgo_search import DDGS
+import subprocess
 
 from llama_index.llms.openai import OpenAI as LlamaOpenAI
 from llama_index.core.tools import FunctionTool
@@ -268,6 +269,37 @@ base_url = (
     or os.getenv("OPENAI_BASE_URL")
     or "https://openrouter.ai/api/v1"
 )
+
+MIGROS_API_TOKEN = (
+    os.getenv("MIGROS_API_TOKEN")
+    or os.getenv("MIGROS_LESHOP_TOKEN")
+    or os.getenv("MIGROS_API_KEY")
+)
+MIGROS_DEFAULT_HEADERS = {
+    "accept": "application/json, text/plain, */*",
+    "content-type": "application/json",
+    "User-Agent": os.getenv(
+        "MIGROS_API_WRAPPER_USERAGENT",
+        "Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0",
+    ),
+}
+
+MIGROS_HELPER_PATH = os.path.join(os.path.dirname(__file__), "migros_price_helper.js")
+
+def _get_node_bin():
+    """Pick a Node binary, preferring env override or newest nvm install."""
+    env_bin = os.getenv("MIGROS_NODE_BIN")
+    if env_bin and os.path.exists(env_bin):
+        return env_bin
+    nvm_dir = os.path.expanduser("~/.nvm/versions/node")
+    if os.path.isdir(nvm_dir):
+        try:
+            versions = sorted(os.listdir(nvm_dir))
+            if versions:
+                return os.path.join(nvm_dir, versions[-1], "bin", "node")
+        except Exception:
+            pass
+    return "node"
 
 client = OpenAI(
     base_url=base_url,
@@ -666,6 +698,233 @@ def plan_full_context(plan_data, max_chars=8000):
     return text
 
 
+def _extract_price_fields(product):
+    """Best-effort price extraction from Migros product payload."""
+    if not isinstance(product, dict):
+        return {}
+    price = None
+    currency = "CHF"
+
+    # Common locations
+    if isinstance(product.get("price"), (int, float, str, dict)):
+        price = product.get("price")
+    prices = product.get("prices") or {}
+    if isinstance(prices, dict):
+        price = price or prices.get("defaultPrice") or prices.get("price")
+        currency = prices.get("currency") or currency
+
+    if isinstance(price, dict):
+        currency = price.get("currency") or currency
+        price = price.get("value") or price.get("amount") or price.get("price")
+
+    try:
+        price = float(price)
+    except (TypeError, ValueError):
+        price = None
+
+    return {"price": price, "currency": currency}
+
+
+def _extract_energy(product):
+    """Attempt to extract calorie/energy info."""
+    if not isinstance(product, dict):
+        return None
+    # Check common keys
+    for key in ["calories", "energyKcal", "energy_kcal", "energy"]:
+        val = product.get(key)
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            continue
+    nutrients = product.get("nutrients") or product.get("nutritionFacts")
+    if isinstance(nutrients, dict):
+        for k in ["energyKcal", "energy_kcal", "calories", "kcal"]:
+            if k in nutrients:
+                try:
+                    return float(nutrients[k])
+                except (TypeError, ValueError):
+                    pass
+    return None
+
+
+def fetch_migros_token():
+    """Get Migros token from env or guest endpoint."""
+    if MIGROS_API_TOKEN:
+        return MIGROS_API_TOKEN
+    try:
+        resp = requests.get(
+            "https://www.migros.ch/authentication/public/v1/api/guest",
+            headers=MIGROS_DEFAULT_HEADERS,
+            timeout=10,
+        )
+        token = resp.headers.get("leshopch")
+        return token
+    except Exception:
+        return None
+
+
+def run_node_migros_helper(names):
+    """Call the Node helper to fetch a guest token and prices for a list of names."""
+    if not os.path.exists(MIGROS_HELPER_PATH):
+        return None
+    try:
+        payload = json.dumps(names)
+    except Exception:
+        return None
+    env = os.environ.copy()
+    env.setdefault("MIGROS_API_WRAPPER_USERAGENT", MIGROS_DEFAULT_HEADERS["User-Agent"])
+    env.setdefault("MIGROS_API_WRAPPER_USECURL", "1")
+    node_bin = _get_node_bin()
+    try:
+        result = subprocess.run(
+            [node_bin, MIGROS_HELPER_PATH, payload],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=45,
+        )
+        if result.returncode != 0:
+            return None
+        return json.loads(result.stdout)
+    except Exception:
+        return None
+
+
+def bulk_search_migros_via_node(names):
+    data = run_node_migros_helper(names)
+    if not data:
+        return None
+    token = data.get("token")
+    if token:
+        global MIGROS_API_TOKEN  # cache for later Python calls
+        if not MIGROS_API_TOKEN:
+            MIGROS_API_TOKEN = token
+    return data.get("results") or []
+
+
+@lru_cache(maxsize=128)
+def search_migros_product(query: str):
+    """Search Migros for a product; returns first product with price info."""
+    if not query:
+        return None
+    token = fetch_migros_token()
+    if not token:
+        return None
+    headers = dict(MIGROS_DEFAULT_HEADERS)
+    headers["leshopch"] = token
+    body = {"query": query, "language": "en", "regionId": 1000}
+    try:
+        resp = requests.post(
+            "https://www.migros.ch/onesearch-oc-seaapi/public/v5/search",
+            json=body,
+            headers=headers,
+            timeout=12,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        products = data.get("products") or []
+        if not products:
+            return None
+        prod = products[0]
+        price_info = _extract_price_fields(prod)
+        energy = _extract_energy(prod)
+        title = prod.get("displayName") or prod.get("name") or query
+        return {
+            "title": title,
+            "price": price_info.get("price"),
+            "currency": price_info.get("currency"),
+            "energy_kcal": energy,
+            "source": "migros",
+            "raw": prod,
+        }
+    except Exception:
+        return None
+
+
+def enrich_plan_with_migros(plan_data):
+    """Attach Migros pricing to plan_data if possible."""
+    if not isinstance(plan_data, dict):
+        return plan_data
+    parsed = parse_plan_raw(plan_data.get("raw_json"))
+    if not parsed:
+        return plan_data
+
+    grocery = parsed.get("grocery_list") or []
+    if isinstance(grocery, dict):
+        grocery = list(grocery.values())
+    names = []
+    if grocery:
+        for g in grocery:
+            if isinstance(g, dict) and g.get("item"):
+                names.append(g.get("item"))
+    # fallback: ingredient keys
+    meal_plan = parsed.get("meal_plan")
+    days = normalize_mealplan(meal_plan)
+    for _, meals in days:
+        for meal in meals.values():
+            for ing_name in (meal.get("ingredients") or {}).keys():
+                names.append(ing_name)
+
+    unique_names = []
+    seen = set()
+    for n in names:
+        key = str(n).strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            unique_names.append(n)
+        if len(unique_names) >= 20:
+            break  # cap to avoid long calls
+
+    node_results = bulk_search_migros_via_node(unique_names)
+    node_map = {}
+    if node_results:
+        for r in node_results:
+            key = str(r.get("query", "")).lower()
+            if key:
+                node_map[key] = r
+
+    priced_items = []
+    total = 0.0
+    currency = None
+    for name in unique_names:
+        key = str(name).strip().lower()
+        info = None
+        if node_map.get(key):
+            r = node_map[key]
+            info = {
+                "title": r.get("title") or name,
+                "price": r.get("price"),
+                "currency": r.get("currency"),
+                "energy_kcal": r.get("energy_kcal"),
+                "source": "migros-node",
+                "url": r.get("url"),
+                "id": r.get("id"),
+                "price_per_unit": r.get("pricePerUnit"),
+                "price_per_unit_text": r.get("pricePerUnitText"),
+            }
+        if not info or info.get("price") is None:
+            info = search_migros_product(str(name))
+        if not info:
+            continue
+        priced_items.append({"query": name, **info})
+        if info.get("price") is not None:
+            total += float(info["price"])
+            currency = info.get("currency") or currency
+
+    if priced_items:
+        plan_data["migros_pricing"] = {
+            "items": priced_items,
+            "estimated_total": round(total, 2),
+            "currency": currency or "CHF",
+            "note": "Estimated total from Migros search (first match per item).",
+        }
+    else:
+        plan_data["migros_pricing"] = {"items": [], "note": "No Migros pricing found."}
+
+    return plan_data
+
+
 def build_user_context(email, profile, plan_data, fields):
     """Bundle profile + live form selections for the chat agent."""
     weight, budget, calories, activity, diet, location, goals, restrictions, budget_ignore, calories_ignore = fields
@@ -707,6 +966,20 @@ def build_user_context(email, profile, plan_data, fields):
     if full_plan:
         context_lines.append("Plan details:")
         context_lines.append(full_plan)
+    pricing = plan_data.get("migros_pricing") if isinstance(plan_data, dict) else None
+    if pricing and pricing.get("items"):
+        context_lines.append(
+            f"Migros price estimate: {pricing.get('estimated_total')} {pricing.get('currency','CHF')} ({len(pricing.get('items',[]))} matched items)."
+        )
+        top_items = pricing.get("items", [])[:8]
+        context_lines.append("Migros items:")
+        for item in top_items:
+            line = f"- {item.get('query')}: {item.get('price')} {item.get('currency','CHF')}"
+            if item.get("url"):
+                line += f" (url: {item.get('url')})"
+            context_lines.append(line)
+    elif pricing:
+        context_lines.append("Migros price estimate unavailable for this plan.")
 
     return "\n".join(context_lines)
 
@@ -850,6 +1123,7 @@ def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity, goals, budget,
             "weight": weight,
             "calorie_target": calorie_target,
         }
+        plan_data = enrich_plan_with_migros(plan_data)
         return plan_view, plan_data
 
     plan_view, plan_raw = generate_plan(
@@ -873,6 +1147,7 @@ def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity, goals, budget,
         "weight": weight,
         "calorie_target": calorie_target,
     }
+    plan_data = enrich_plan_with_migros(plan_data)
     return plan_view, plan_data
 
 
