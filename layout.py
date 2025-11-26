@@ -12,6 +12,28 @@ layout = html.Div([
     html.P("Your AI meal planner – plan smart, eat better", style={"textAlign": "center", "color": "gray", "marginBottom": "20px"}),
 
     html.Div([
+        html.H3("Your profile"),
+        html.P("Save your info once to reuse it next time you visit.", style={"color": "#6c757d"}),
+        html.Label("Email"),
+        dcc.Input(id="user_email", type="email", placeholder="you@example.com", style={"width": "100%", "marginBottom": "10px"}),
+        html.Label("Name"),
+        dcc.Input(id="user_name", type="text", placeholder="Sam C.", style={"width": "100%", "marginBottom": "10px"}),
+        html.Label("Notes or preferences"),
+        dcc.Textarea(id="user_notes", placeholder="E.g., lactose intolerant, prefers quick breakfasts", style={"width": "100%", "height": "70px", "marginBottom": "10px"}),
+        html.Div([
+            html.Button("Save profile", id="save_profile", n_clicks=0, style={
+                "backgroundColor": "#17a2b8", "color": "white", "border": "none", "padding": "8px 12px", "borderRadius": "5px"
+            }),
+            html.Button("Load saved info", id="load_profile", n_clicks=0, style={
+                "backgroundColor": "#6c757d", "color": "white", "border": "none", "padding": "8px 12px",
+                "borderRadius": "5px", "marginLeft": "10px"
+            })
+        ], style={"marginBottom": "10px"}),
+        html.Div(id="profile_message", style={"marginTop": "5px", "color": "#0d6efd"}),
+        html.Div(id="profile_dashboard", style={"marginTop": "10px"}),
+    ], style={"maxWidth": "600px", "margin": "auto", "marginBottom": "30px", "padding": "15px", "border": "1px solid #dee2e6", "borderRadius": "8px", "backgroundColor": "#f8f9fa"}),
+
+    html.Div([
         html.Label("Weight (kg)"),
         dcc.Slider(
           id="body_weight",
@@ -105,6 +127,6 @@ layout = html.Div([
     ], style={"maxWidth": "600px", "margin": "auto"}),
     html.Div(id="test_recipes_output", style={"maxWidth": "600px", "margin": "40px auto"}),
 
-    html.Div(id="plan_output", style={"marginTop": "40px", "maxWidth": "600px", "margin": "auto"})
+    html.Div(id="plan_output", style={"marginTop": "40px", "maxWidth": "600px", "margin": "auto"}),
+    dcc.Store(id="latest_plan_data")
 ])
-

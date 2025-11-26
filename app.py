@@ -1,8 +1,11 @@
-from dash import Dash, Input, Output, State, html, dcc, callback_context
+from dash import Dash, Input, Output, State, html, dcc, callback_context, no_update
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 import os
+import sqlite3
+import json
 from dotenv import load_dotenv
+from datetime import datetime
 
 app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
 
@@ -11,6 +14,180 @@ app.title = "CULINAIRE 🥗"
 from layout import layout
 app.layout = layout
 load_dotenv()  # load env vars from .env if present
+
+# -------------------- USER DATA STORAGE --------------------
+
+DB_PATH = os.getenv("USER_DB_PATH", "user_profiles.db")
+
+
+def init_db():
+    """Ensure the local SQLite database and table exist."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            email TEXT PRIMARY KEY,
+            name TEXT,
+            weight REAL,
+            activity TEXT,
+            goals TEXT,
+            budget REAL,
+            calories REAL,
+            restrictions TEXT,
+            diet TEXT,
+            location TEXT,
+            notes TEXT,
+            last_plan TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def serialize_goals(goals):
+    if not goals:
+        return "[]"
+    try:
+        return json.dumps(goals)
+    except TypeError:
+        return json.dumps([str(g) for g in goals])
+
+
+def parse_goals(goals_text):
+    if not goals_text:
+        return []
+    try:
+        parsed = json.loads(goals_text)
+        return parsed if isinstance(parsed, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def safe_float(val):
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def save_user_profile(email, name, weight, activity, goals, budget, calories, restrictions, diet, location, notes, last_plan):
+    """Insert or update a user profile along with the latest plan snapshot."""
+    if not email:
+        return
+    init_db()
+    timestamp = datetime.utcnow().isoformat()
+    payload = (
+        email.strip().lower(),
+        name.strip() if name else None,
+        safe_float(weight),
+        activity,
+        serialize_goals(goals),
+        safe_float(budget),
+        safe_float(calories),
+        restrictions,
+        diet,
+        location,
+        notes,
+        last_plan,
+        timestamp,
+    )
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """
+        INSERT INTO user_profiles
+        (email, name, weight, activity, goals, budget, calories, restrictions, diet, location, notes, last_plan, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(email) DO UPDATE SET
+            name=excluded.name,
+            weight=excluded.weight,
+            activity=excluded.activity,
+            goals=excluded.goals,
+            budget=excluded.budget,
+            calories=excluded.calories,
+            restrictions=excluded.restrictions,
+            diet=excluded.diet,
+            location=excluded.location,
+            notes=excluded.notes,
+            last_plan=excluded.last_plan,
+            updated_at=excluded.updated_at
+        """,
+        payload,
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_user_profile(email):
+    if not email:
+        return None
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM user_profiles WHERE email = ?", (email.strip().lower(),)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    profile = dict(row)
+    profile["goals"] = parse_goals(profile.get("goals"))
+    return profile
+
+
+def render_profile_dashboard(profile):
+    """Create a simple dashboard view from a stored profile."""
+    if not profile:
+        return html.Div("No saved data yet. Add your email and click Save profile.", style={"color": "#6c757d"})
+
+    rows = []
+    items = [
+        ("Name", profile.get("name") or "—"),
+        ("Email", profile.get("email") or "—"),
+        ("Weight", f"{profile.get('weight')} kg" if profile.get("weight") else "—"),
+        ("Activity", profile.get("activity") or "—"),
+        ("Diet", profile.get("diet") or "—"),
+        ("Goals", ", ".join(profile.get("goals") or []) or "—"),
+        ("Budget", f"{profile.get('budget')} CHF" if profile.get("budget") is not None else "—"),
+        ("Calories", f"{profile.get('calories')} kcal" if profile.get("calories") is not None else "—"),
+        ("Restrictions", profile.get("restrictions") or "—"),
+        ("Location", profile.get("location") or "—"),
+        ("Notes", profile.get("notes") or "—"),
+        ("Updated", profile.get("updated_at") or "—"),
+    ]
+    for label, value in items:
+        rows.append(
+            html.Div(
+                [
+                    html.Div(label, style={"fontWeight": "bold", "width": "30%"}),
+                    html.Div(value, style={"width": "70%"}),
+                ],
+                style={"display": "flex", "marginBottom": "6px"},
+            )
+        )
+
+    plan_preview = None
+    last_plan = profile.get("last_plan")
+    if last_plan:
+        plan_preview = html.Details(
+            [
+                html.Summary("Last saved plan JSON"),
+                html.Pre(last_plan[:1200], style={"whiteSpace": "pre-wrap", "background": "#f8f9fa", "padding": "10px"}),
+            ],
+            open=False,
+        )
+
+    return html.Div(
+        [
+            html.H4("Profile Dashboard"),
+            html.Div(rows, style={"padding": "10px", "border": "1px solid #dee2e6", "borderRadius": "8px", "background": "#fff"}),
+            plan_preview if plan_preview else html.Div("No plan saved yet.", style={"marginTop": "10px"}),
+        ],
+        style={"marginTop": "10px"},
+    )
+
+# Initialize storage on startup
+init_db()
 
 # -------------------- GOOGLE ANALYTICS --------------------
 
@@ -271,6 +448,7 @@ def generate_plan(n, weight, activity, goals, budget, calories, restrictions, di
 
     raw_content = ""
     json_text = ""
+    plan_payload = None
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -281,13 +459,15 @@ def generate_plan(n, weight, activity, goals, budget, calories, restrictions, di
         raw_content = (response.choices[0].message.content or "").strip()
         json_text = extract_json_block(raw_content)
         plan = load_plan(json_text)
-        return render_plan_view(plan, calories)
+        plan_payload = json_text
+        return render_plan_view(plan, calories), plan_payload
     except json.JSONDecodeError as je:
         cleaned_text = clean_json_text(json_text)
         if cleaned_text != json_text:
             try:
                 plan = load_plan(cleaned_text)
-                return render_plan_view(plan, calories)
+                plan_payload = cleaned_text
+                return render_plan_view(plan, calories), plan_payload
             except json.JSONDecodeError:
                 pass
 
@@ -297,9 +477,9 @@ def generate_plan(n, weight, activity, goals, budget, calories, restrictions, di
                 html.P(f"Error: JSON parsing failed – {je}", style={"color": "red", "fontWeight": "bold"}),
                 html.Pre(snippet, style={"whiteSpace": "pre-wrap", "background": "#f8f9fa", "padding": "10px"}),
             ]
-        )
+        ), plan_payload or cleaned_text or json_text
     except Exception as e:
-        return html.Div(f"Error: {type(e).__name__} – {e}", style={"color": "red"})
+        return html.Div(f"Error: {type(e).__name__} – {e}", style={"color": "red"}), plan_payload or json_text or raw_content
 
 
 def generate_plan_hf(n, weight, activity, goals, budget, calories, restrictions, diet, location):
@@ -334,6 +514,7 @@ def generate_plan_hf(n, weight, activity, goals, budget, calories, restrictions,
     """
     raw_content = ""
     json_text = ""
+    plan_payload = None
     try:
         pipe = get_hf_pipeline()
         raw_output = pipe(
@@ -347,18 +528,20 @@ def generate_plan_hf(n, weight, activity, goals, budget, calories, restrictions,
         raw_content = raw_output.get("generated_text") or ""
         json_text = extract_json_block(raw_content)
         plan = load_plan(json_text)
-        return render_plan_view(plan, calories)
+        plan_payload = json_text
+        return render_plan_view(plan, calories), plan_payload
     except Exception as e:
         return html.Div(
             [
                 html.P(f"Error using HuggingFace model: {type(e).__name__} – {e}", style={"color": "red", "fontWeight": "bold"}),
                 html.Pre((raw_content or "")[:800], style={"whiteSpace": "pre-wrap", "background": "#f8f9fa", "padding": "10px"}),
             ]
-        )
+        ), plan_payload or json_text or raw_content
 
 
 @app.callback(
     Output("plan_output", "children"),
+    Output("latest_plan_data", "data"),
     Input("generate", "n_clicks"),
     Input("generate_hf", "n_clicks"),
     State("body_weight", "value"),
@@ -371,8 +554,11 @@ def generate_plan_hf(n, weight, activity, goals, budget, calories, restrictions,
     State("location", "value"),
     State("budget_ignore", "value"),
     State("calories_ignore", "value"),
+    State("user_email", "value"),
+    State("user_name", "value"),
+    State("user_notes", "value"),
 )
-def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity, goals, budget, calories, restrictions, diet, location, budget_ignore, calories_ignore):
+def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity, goals, budget, calories, restrictions, diet, location, budget_ignore, calories_ignore, email, name, notes):
     if not n_clicks and not n_clicks_hf:
         raise PreventUpdate
 
@@ -383,7 +569,7 @@ def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity, goals, budget,
     calorie_target = calories if "ignore" not in (calories_ignore or []) else 2400
 
     if trigger == "generate_hf":
-        return generate_plan_hf(
+        plan_view, plan_raw = generate_plan_hf(
             n_clicks_hf,
             weight,
             activity,
@@ -395,7 +581,19 @@ def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity, goals, budget,
             location or "Not specified",
         )
 
-    return generate_plan(
+        plan_data = {
+            "raw_json": plan_raw,
+            "provider": "huggingface",
+            "generated_at": datetime.utcnow().isoformat(),
+            "email": email,
+            "name": name,
+            "notes": notes,
+            "weight": weight,
+            "calorie_target": calorie_target,
+        }
+        return plan_view, plan_data
+
+    plan_view, plan_raw = generate_plan(
         n_clicks,
         weight,
         activity,
@@ -405,6 +603,113 @@ def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity, goals, budget,
         restrictions or "None",
         diet,
         location or "Not specified",
+    )
+    plan_data = {
+        "raw_json": plan_raw,
+        "provider": "openrouter",
+        "generated_at": datetime.utcnow().isoformat(),
+        "email": email,
+        "name": name,
+        "notes": notes,
+        "weight": weight,
+        "calorie_target": calorie_target,
+    }
+    return plan_view, plan_data
+
+
+@app.callback(
+    Output("profile_dashboard", "children"),
+    Output("profile_message", "children"),
+    Input("latest_plan_data", "data"),
+    Input("save_profile", "n_clicks"),
+    Input("load_profile", "n_clicks"),
+    State("user_email", "value"),
+    State("user_name", "value"),
+    State("body_weight", "value"),
+    State("activity", "value"),
+    State("goals", "value"),
+    State("budget", "value"),
+    State("dayly_calories", "value"),
+    State("restrictions", "value"),
+    State("diet_type", "value"),
+    State("location", "value"),
+    State("user_notes", "value"),
+    prevent_initial_call=True,
+)
+def persist_profile(plan_data, save_clicks, load_clicks, email, name, weight, activity, goals, budget, calories, restrictions, diet, location, notes):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+    trigger = ctx.triggered[0]["prop_id"].split(".")[0]
+
+    if not email:
+        return no_update, html.Span("Add an email to save or load your profile.", style={"color": "#dc3545"})
+
+    if trigger == "load_profile":
+        profile = get_user_profile(email)
+        if not profile:
+            return render_profile_dashboard(None), html.Span("No saved profile found for that email yet.", style={"color": "#dc3545"})
+        return render_profile_dashboard(profile), html.Span("Loaded saved profile.", style={"color": "#198754"})
+
+    last_plan = None
+    if isinstance(plan_data, dict):
+        last_plan = plan_data.get("raw_json")
+    elif isinstance(plan_data, str):
+        last_plan = plan_data
+
+    save_user_profile(
+        email=email,
+        name=name,
+        weight=weight,
+        activity=activity,
+        goals=goals or [],
+        budget=budget,
+        calories=calories,
+        restrictions=restrictions,
+        diet=diet,
+        location=location,
+        notes=notes,
+        last_plan=last_plan,
+    )
+    profile = get_user_profile(email)
+    msg = "Profile auto-saved with your latest plan." if trigger == "latest_plan_data" else "Profile saved."
+    return render_profile_dashboard(profile), html.Span(msg, style={"color": "#198754"})
+
+
+@app.callback(
+    Output("user_name", "value"),
+    Output("body_weight", "value"),
+    Output("activity", "value"),
+    Output("goals", "value"),
+    Output("budget", "value"),
+    Output("dayly_calories", "value"),
+    Output("restrictions", "value"),
+    Output("diet_type", "value"),
+    Output("location", "value"),
+    Output("user_notes", "value"),
+    Input("load_profile", "n_clicks"),
+    State("user_email", "value"),
+    prevent_initial_call=True,
+)
+def populate_profile_fields(n_clicks, email):
+    if not n_clicks or not email:
+        raise PreventUpdate
+
+    profile = get_user_profile(email)
+    if not profile:
+        return (no_update,) * 10
+
+    return (
+        profile.get("name"),
+        profile.get("weight"),
+        profile.get("activity"),
+        profile.get("goals"),
+        profile.get("budget"),
+        profile.get("calories"),
+        profile.get("restrictions"),
+        profile.get("diet"),
+        profile.get("location"),
+        profile.get("notes"),
     )
 
 @app.callback(
