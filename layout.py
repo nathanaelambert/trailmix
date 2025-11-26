@@ -235,7 +235,7 @@ layout = html.Div([
     dcc.Loading(
         id="loading-plan",
         type="default",
-        children=html.Div(id="plan_output", style={"marginTop": "40px", "maxWidth": "600px", "margin": "auto"}),
+        children=html.Div(id="plan_output", style={"marginTop": "40px", "maxWidth": "95%", "margin": "auto", "padding": "0 20px"}),
         style={"marginTop": "40px"}
     ),
     
@@ -246,7 +246,7 @@ layout = html.Div([
     dcc.Loading(
         id="loading-test-recipes",
         type="default",
-        children=html.Div(id="test_recipes_output", style={"maxWidth": "600px", "margin": "40px auto"}),
+        children=html.Div(id="test_recipes_output", style={"maxWidth": "95%", "margin": "40px auto", "padding": "0 20px"}),
     ),
     html.Hr(),
     html.Div([

@@ -570,8 +570,8 @@ def render_plan_view(plan: dict, target: float, portions: dict = None):
                     html.H5(m.capitalize(), style={"color": "#7f8c8d", "fontSize": "14px", "marginBottom": "8px", "textTransform": "uppercase", "letterSpacing": "0.5px"}),
                     html.Div("No meal planned", style={"fontSize": "14px", "color": "#95a5a6", "fontStyle": "italic", "padding": "20px", "textAlign": "center"})
                 ], style={
-                    "flex": "1",
-                    "minWidth": "300px",
+                    "flex": "1 1 0",
+                    "minWidth": "0",
                     "padding": "15px",
                     "backgroundColor": "#f8f9fa",
                     "border": "1px solid #e0e0e0",
@@ -581,11 +581,17 @@ def render_plan_view(plan: dict, target: float, portions: dict = None):
                 meal_cards.append(meal_card)
                 continue
             
-            # Meal header with name, portions, and calories
+            # Meal header with name, portions, and calories (per portion)
+            calories_per_portion = meal.get('calories', '?')
+            if portion_count > 1:
+                calorie_display = f"{calories_per_portion} kcal/portion (×{portion_count} = {int(calories_per_portion) * portion_count if calories_per_portion != '?' else '?'} kcal total)"
+            else:
+                calorie_display = f"{calories_per_portion} kcal"
+            
             meal_header = html.Div([
                 html.Span(meal.get('meal', m), style={"fontWeight": "bold", "fontSize": "16px", "color": "#2c3e50"}),
                 html.Span(f" • {portion_count} portion{'s' if portion_count != 1 else ''}", style={"fontSize": "13px", "color": "#3498db", "marginLeft": "8px", "fontWeight": "500"}),
-                html.Span(f" • {meal.get('calories','?')} kcal", style={"fontSize": "13px", "color": "#7f8c8d", "marginLeft": "8px"}),
+                html.Span(f" • {calorie_display}", style={"fontSize": "13px", "color": "#7f8c8d", "marginLeft": "8px"}),
             ], style={"marginBottom": "10px"})
             
             # Ingredients in card grid
@@ -653,8 +659,8 @@ def render_plan_view(plan: dict, target: float, portions: dict = None):
                     "target_calories": meal.get('calories', target // 3)
                 })
             ], id=meal_card_id, style={
-                "flex": "1",
-                "minWidth": "300px",
+                "flex": "1 1 0",
+                "minWidth": "0",
                 "padding": "15px",
                 "backgroundColor": "#fff",
                 "border": "1px solid #e0e0e0",
@@ -664,13 +670,15 @@ def render_plan_view(plan: dict, target: float, portions: dict = None):
             
             meal_cards.append(meal_card)
         
-        # Horizontal container for all meals
+        # Horizontal container for all meals - FORCE HORIZONTAL LAYOUT
         meals_content = [
             html.Div(meal_cards, style={
                 "display": "flex",
-                "flexWrap": "wrap",
+                "flexWrap": "nowrap",  # Never wrap to next line
                 "gap": "10px",
-                "justifyContent": "space-between"
+                "justifyContent": "space-between",
+                "width": "100%",
+                "overflowX": "auto"  # Scroll if needed instead of wrapping
             })
         ]
         
@@ -939,38 +947,29 @@ def generate_plan(n, weight, activity_hours, goals, budget, calories, restrictio
     if cuisines and len(cuisines) > 0:
         cuisine_pref = f"- Preferred cuisines: {', '.join(cuisines)}"
     
-    # Build portions info - detailed per day and meal with calorie calculations
-    portions_lines = ["Portions per meal with calorie targets:"]
+    # Build portions info - just show which meals to cook, NO calorie totals
+    portions_lines = ["Number of portions (people) to cook for each meal:"]
     days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    
+    # Base calories per person per meal (for 1 portion) - FIXED
+    base_calories = {
+        "breakfast": round(calories * 0.25),  # 25% of daily
+        "lunch": round(calories * 0.35),      # 35% of daily
+        "dinner": round(calories * 0.40),     # 40% of daily
+    }
     
     for day in days_list:
         day_portions = []
-        meal_calories = {}
-        total_portions_for_day = 0
         
-        # Calculate total portions for this day
+        # Just show portions, NO calorie calculations to avoid confusing LLM
         for meal in ["breakfast", "lunch", "dinner"]:
             key = f"{day}_{meal}"
             p = portions.get(key, 1)
-            total_portions_for_day += p
-        
-        # Calculate calories per portion for this day
-        if total_portions_for_day > 0:
-            calories_per_portion = calories / total_portions_for_day
-        else:
-            calories_per_portion = 0
-        
-        # Build meal info with calorie targets
-        for meal in ["breakfast", "lunch", "dinner"]:
-            key = f"{day}_{meal}"
-            p = portions.get(key, 1)
+            
             if p == 0:
-                day_portions.append(f"{meal}: SKIP (0 kcal)")
-                meal_calories[meal] = 0
+                day_portions.append(f"{meal}: SKIP")
             else:
-                target_cals = round(calories_per_portion * p)
-                day_portions.append(f"{meal}: {p}p (~{target_cals} kcal)")
-                meal_calories[meal] = target_cals
+                day_portions.append(f"{meal}: {p} person{'s' if p != 1 else ''}")
         
         portions_lines.append(f"  {day}: {', '.join(day_portions)}")
     
@@ -983,13 +982,13 @@ def generate_plan(n, weight, activity_hours, goals, budget, calories, restrictio
     - Goals: {', '.join(goals or [])}
     - Diet: {diet}
     - Restrictions: {restrictions or 'None'}
-    - Target calories: {calories} kcal/day
     - Budget: {budget} CHF
     - Location: {location}
     - Complexity: {complexity_desc}
     {f"- Ingredients to AVOID: {avoid_ingredients}" if avoid_ingredients else ""}
     {f"- Foods user is craving: {cravings}" if cravings else ""}
     {cuisine_pref}
+    
     {portions_info}
     
     IMPORTANT:
@@ -998,16 +997,27 @@ def generate_plan(n, weight, activity_hours, goals, budget, calories, restrictio
     - Match the complexity level: {complexity_desc}
     {f"- Favor these cuisines: {', '.join(cuisines or [])}" if cuisines else ""}
     
-    CALORIE & PORTIONS HANDLING (CRITICAL):
-    - Each meal above shows its target calories based on portions (e.g., "breakfast: 2p (~800 kcal)" means 2 portions totaling 800 kcal)
-    - Match the calorie targets shown for each meal - they're calculated to sum to {calories} kcal per day
-    - For meals with 0 portions (marked "SKIP"): Set {{"meal": "Skipped", "calories": 0, "ingredients": {{}}, "recipe": "No meal planned"}}
-    - Scale ingredients proportionally to the calorie target (more portions = more ingredients to reach the higher calorie target)
+    ⚠️ CALORIE TARGETS (CRITICAL - IGNORE DAILY TOTALS, FOCUS ON PER-MEAL):
     
-    Example: If a day shows "breakfast: 2p (~800 kcal), lunch: 0p (SKIP), dinner: 1p (~400 kcal)":
-    - Breakfast should have ~800 kcal total (scaled for 2 people)
-    - Lunch should be skipped entirely
-    - Dinner should have ~400 kcal (for 1 person)
+    DO NOT try to balance daily calories. Instead, create EACH MEAL independently with these FIXED targets:
+    
+    FIXED CALORIES PER PERSON PER MEAL:
+      * Every breakfast: {base_calories['breakfast']} kcal per person (always)
+      * Every lunch: {base_calories['lunch']} kcal per person (always)
+      * Every dinner: {base_calories['dinner']} kcal per person (always)
+    
+    CRITICAL RULES:
+    - Generate each meal to hit its specific calorie target (breakfast={base_calories['breakfast']}, lunch={base_calories['lunch']}, dinner={base_calories['dinner']})
+    - DO NOT look at daily totals
+    - DO NOT adjust meals based on what other meals are that day
+    - If a meal is SKIPPED, the other meals that day stay at their normal calories
+    - The "calories" field in JSON = the per-person target ({base_calories['breakfast']} for breakfast, {base_calories['lunch']} for lunch, {base_calories['dinner']} for dinner)
+    - Scale INGREDIENTS for the number of portions, but keep per-person calories the same
+    
+    Example: Monday breakfast SKIP, lunch 1 person, dinner 2 persons:
+    - Breakfast: {{"meal": "Skipped", "calories": 0, "ingredients": {{}}, "recipe": "No meal planned"}}
+    - Lunch: {{"meal": "...", "calories": {base_calories['lunch']}, "ingredients": {{...}}, "recipe": "..."}} (normal lunch, NOT increased)
+    - Dinner: {{"meal": "...", "calories": {base_calories['dinner']}, "ingredients": {{... doubled quantities}}, "recipe": "..."}} (normal dinner per person, ingredients for 2)
     
     GROCERY LIST: Sum up ALL ingredients across the week, accounting for the portion multipliers. Skip meals with 0 portions entirely.
     """
@@ -1061,38 +1071,42 @@ def generate_plan_hf(n, weight, activity_hours, goals, budget, calories, restric
     }.get(complexity, "Medium complexity")
     
     # Build portions info - detailed per day and meal with calorie calculations
-    portions_lines = ["Portions per meal with calorie targets:"]
+    # Use realistic meal calorie distribution: Breakfast 25%, Lunch 35%, Dinner 40%
+    portions_lines = ["Portions per meal with calorie targets (per portion):"]
     days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    
+    # Base calories per person per meal (for 1 portion)
+    base_calories = {
+        "breakfast": round(calories * 0.25),  # 25% of daily
+        "lunch": round(calories * 0.35),      # 35% of daily
+        "dinner": round(calories * 0.40),     # 40% of daily
+    }
     
     for day in days_list:
         day_portions = []
-        total_portions_for_day = 0
-        
-        # Calculate total portions for this day
-        for meal in ["breakfast", "lunch", "dinner"]:
-            key = f"{day}_{meal}"
-            p = portions.get(key, 1)
-            total_portions_for_day += p
-        
-        # Calculate calories per portion for this day
-        if total_portions_for_day > 0:
-            calories_per_portion = calories / total_portions_for_day
-        else:
-            calories_per_portion = 0
         
         # Build meal info with calorie targets
         for meal in ["breakfast", "lunch", "dinner"]:
             key = f"{day}_{meal}"
             p = portions.get(key, 1)
+            
             if p == 0:
                 day_portions.append(f"{meal}: SKIP (0 kcal)")
             else:
-                target_cals = round(calories_per_portion * p)
-                day_portions.append(f"{meal}: {p}p (~{target_cals} kcal)")
+                # Calories = base_per_person × number_of_portions
+                target_cals = base_calories[meal] * p
+                day_portions.append(f"{meal}: {p}p (~{target_cals} kcal total)")
         
         portions_lines.append(f"  {day}: {', '.join(day_portions)}")
     
     portions_info = "\n".join(portions_lines)
+    
+    # Add explanation of the calorie model
+    portions_info += "\n\nCalorie model: Each portion represents one person's meal. Base calories per person: Breakfast ~{} kcal, Lunch ~{} kcal, Dinner ~{} kcal.".format(
+        base_calories["breakfast"],
+        base_calories["lunch"],
+        base_calories["dinner"]
+    )
     
     user_prompt = f"""
     You are CULINAIRE. Create a 7-day meal plan as pure JSON only.
@@ -1111,13 +1125,18 @@ def generate_plan_hf(n, weight, activity_hours, goals, budget, calories, restric
     {f"- Cuisines: {', '.join(cuisines or [])}" if cuisines else ""}
     {portions_info}
     
-    CALORIE & PORTIONS HANDLING (CRITICAL):
-    - Each meal above shows its target calories (e.g., "breakfast: 2p (~800 kcal)" = 2 portions totaling 800 kcal)
-    - Match the calorie targets shown - they're calculated to sum to {calories} kcal per day
-    - For 0 portions (SKIP): Set {{"meal": "Skipped", "calories": 0, "ingredients": {{}}, "recipe": "No meal planned"}}
-    - Scale ingredients to match the calorie target
-    - CRAVINGS: Use cravings in ONLY 1-2 meals during the ENTIRE week, not every day
-    - GROCERY LIST: Sum all ingredients, skip 0-portion meals
+    ⚠️ CALORIE TARGETS (IGNORE DAILY TOTALS, FOCUS ON PER-MEAL):
+    
+    Generate EACH MEAL independently with these FIXED targets:
+    - Every breakfast: {base_calories['breakfast']} kcal per person
+    - Every lunch: {base_calories['lunch']} kcal per person
+    - Every dinner: {base_calories['dinner']} kcal per person
+    
+    DO NOT look at daily totals. DO NOT adjust meals based on other meals that day.
+    "calories" field = per-person target. Scale INGREDIENTS for portions.
+    For SKIP: {{"meal": "Skipped", "calories": 0, "ingredients": {{}}, "recipe": "No meal planned"}}
+    CRAVINGS: Use in ONLY 1-2 meals during ENTIRE week
+    GROCERY LIST: Sum all ingredients, skip 0-portion meals
 
     Return exactly this shape (no extra keys):
     {{
@@ -1133,8 +1152,7 @@ def generate_plan_hf(n, weight, activity_hours, goals, budget, calories, restric
       "grocery_list": [{{"item": "Bananas", "quantity": "6", "category": "Produce"}}],
       "summary": {{"average_daily_calories": 0, "estimated_weekly_cost": "CHF 0", "nutrition_focus": "balanced"}}
     }}
-    Each meal object must include: "meal", "ingredients" (dict), "calories" (number), "recipe" (1 sentence).
-    Make calorie totals close to target.
+    Each meal: "meal", "ingredients" (dict), "calories" (number = {base_calories['breakfast']}/{base_calories['lunch']}/{base_calories['dinner']}), "recipe".
     """
     raw_content = ""
     json_text = ""
