@@ -594,6 +594,78 @@ def latest_plan_summary(plan_data):
     return f"Latest meal plan JSON (truncated): {snippet}"
 
 
+def parse_plan_raw(plan_raw):
+    if not plan_raw:
+        return None
+    try:
+        data = json.loads(plan_raw)
+        if isinstance(data, str):
+            data = json.loads(data)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        return None
+    return None
+
+
+def plan_digest(plan_data, max_days=3):
+    """Small, model-friendly digest of the plan for chat."""
+    if not isinstance(plan_data, dict):
+        return ""
+    plan_raw = plan_data.get("raw_json")
+    parsed = parse_plan_raw(plan_raw)
+    if not parsed:
+        return ""
+    meal_plan = parsed.get("meal_plan")
+    days = normalize_mealplan(meal_plan)
+    lines = []
+    for idx, (day_name, meals) in enumerate(days):
+        if idx >= max_days:
+            lines.append(f"...({len(days) - max_days} more days)")
+            break
+        lines.append(f"{day_name}:")
+        for meal_name in ["breakfast", "lunch", "dinner"]:
+            meal = meals.get(meal_name, {})
+            title = meal.get("meal") or meal_name.title()
+            cals = meal.get("calories")
+            lines.append(f"- {meal_name.title()}: {title} ({cals} kcal)")
+    grocery = parsed.get("grocery_list")
+    if grocery:
+        lines.append(f"Grocery items: {len(grocery)} entries.")
+    summary = parsed.get("summary", {})
+    if summary:
+        lines.append(f"Summary: avg daily calories {summary.get('average_daily_calories')}, est weekly cost {summary.get('estimated_weekly_cost')}.")
+    return "\n".join(lines)
+
+
+def plan_full_context(plan_data, max_chars=8000):
+    """Richer per-day overview so the agent can answer specific day questions."""
+    if not isinstance(plan_data, dict):
+        return ""
+    parsed = parse_plan_raw(plan_data.get("raw_json"))
+    if not parsed:
+        return ""
+    meal_plan = parsed.get("meal_plan")
+    days = normalize_mealplan(meal_plan)
+    lines = []
+    for day_name, meals in days:
+        lines.append(day_name + ":")
+        for meal_name in ["breakfast", "lunch", "dinner"]:
+            meal = meals.get(meal_name, {})
+            title = meal.get("meal") or meal_name.title()
+            cals = meal.get("calories")
+            ing = meal.get("ingredients", {})
+            ing_list = ", ".join(f"{k} {v}" for k, v in ing.items()) if ing else "ingredients not provided"
+            lines.append(f"- {meal_name.title()}: {title} ({cals} kcal) | {ing_list}")
+    summary = parsed.get("summary", {})
+    if summary:
+        lines.append(f"Summary: avg daily calories {summary.get('average_daily_calories')}, est weekly cost {summary.get('estimated_weekly_cost')}, focus {summary.get('nutrition_focus')}.")
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        return text[:max_chars] + "... (truncated)"
+    return text
+
+
 def build_user_context(email, profile, plan_data, fields):
     """Bundle profile + live form selections for the chat agent."""
     weight, budget, calories, activity, diet, location, goals, restrictions, budget_ignore, calories_ignore = fields
@@ -627,6 +699,14 @@ def build_user_context(email, profile, plan_data, fields):
     plan_text = latest_plan_summary(plan_data)
     if plan_text:
         context_lines.append(plan_text)
+    digest = plan_digest(plan_data)
+    if digest:
+        context_lines.append("Plan digest:")
+        context_lines.append(digest)
+    full_plan = plan_full_context(plan_data)
+    if full_plan:
+        context_lines.append("Plan details:")
+        context_lines.append(full_plan)
 
     return "\n".join(context_lines)
 
@@ -711,7 +791,7 @@ def chat_with_agent(user_message, history, plan_data, email, form_fields):
     {history_text}
 
     User question: {user_message}
-    Remember: keep continuity with earlier answers, reuse user-provided details, and cite sources with URLs. Use web_search tool for up-to-date or factual items.
+    Remember: keep continuity with earlier answers, reuse user-provided details, use the plan digest above when talking about the meal plan, and cite sources with URLs. Use web_search tool for up-to-date or factual items.
     """
 
     response = agent.chat(prompt)
