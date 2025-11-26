@@ -1,4 +1,5 @@
-from dash import Dash, Input, Output, State, html, dcc, callback_context, no_update
+from dash import Dash, Input, Output, State, html, dcc, callback_context, no_update, ALL, MATCH, dcc
+from flask import send_file
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 import os
@@ -9,18 +10,28 @@ from datetime import datetime
 import requests
 from duckduckgo_search import DDGS
 import subprocess
+from io import BytesIO
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.units import inch
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+import tempfile
+
+# Load environment variables FIRST before anything else
+load_dotenv()
 
 from llama_index.llms.openai import OpenAI as LlamaOpenAI
 from llama_index.core.tools import FunctionTool
 from llama_index.core.agent import ReActAgent
 
-app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
+app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY], suppress_callback_exceptions=True)
 
 app.title = "CULINAIRE 🥗"
 
 from layout import layout
 app.layout = layout
-load_dotenv()  # load env vars from .env if present
 
 ACTIVITY_OPTIONS = ["Sedentary","Lightly active","Moderately active","Very active","Extra active"]
 DIET_OPTIONS = ["Omnivore","Vegetarian","Keto","Vegan","Pescatarian","Gluten free","Other"]
@@ -50,12 +61,42 @@ def init_db():
             restrictions TEXT,
             diet TEXT,
             location TEXT,
-            notes TEXT,
+            avoid_ingredients TEXT,
+            cravings TEXT,
+            complexity TEXT,
+            cuisines TEXT,
             last_plan TEXT,
             updated_at TEXT
         )
         """
     )
+    
+    # Add new columns if they don't exist (for existing databases)
+    try:
+        conn.execute("ALTER TABLE user_profiles ADD COLUMN avoid_ingredients TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    
+    try:
+        conn.execute("ALTER TABLE user_profiles ADD COLUMN cravings TEXT")
+    except sqlite3.OperationalError:
+        pass
+    
+    try:
+        conn.execute("ALTER TABLE user_profiles ADD COLUMN complexity TEXT")
+    except sqlite3.OperationalError:
+        pass
+    
+    try:
+        conn.execute("ALTER TABLE user_profiles ADD COLUMN cuisines TEXT")
+    except sqlite3.OperationalError:
+        pass
+    
+    try:
+        conn.execute("ALTER TABLE user_profiles ADD COLUMN portions_json TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    
     conn.commit()
     conn.close()
 
@@ -86,24 +127,32 @@ def safe_float(val):
         return None
 
 
-def save_user_profile(email, name, weight, activity, goals, budget, calories, restrictions, diet, location, notes, last_plan):
+def save_user_profile(email, name, weight, activity_hours, goals, budget, calories, restrictions, diet, location, avoid_ingredients, cravings, complexity, cuisines, last_plan, portions=None):
     """Insert or update a user profile along with the latest plan snapshot."""
     if not email:
         return
     init_db()
     timestamp = datetime.utcnow().isoformat()
+    
+    # Serialize portions dict to JSON
+    portions_json = json.dumps(portions) if portions else None
+    
     payload = (
         email.strip().lower(),
         name.strip() if name else None,
         safe_float(weight),
-        activity,
+        activity_hours,
         serialize_goals(goals),
         safe_float(budget),
         safe_float(calories),
         restrictions,
         diet,
         location,
-        notes,
+        avoid_ingredients,
+        cravings,
+        complexity,
+        serialize_goals(cuisines),  # Reuse serialize_goals for cuisines list
+        portions_json,
         last_plan,
         timestamp,
     )
@@ -112,8 +161,8 @@ def save_user_profile(email, name, weight, activity, goals, budget, calories, re
     conn.execute(
         """
         INSERT INTO user_profiles
-        (email, name, weight, activity, goals, budget, calories, restrictions, diet, location, notes, last_plan, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (email, name, weight, activity, goals, budget, calories, restrictions, diet, location, avoid_ingredients, cravings, complexity, cuisines, portions_json, last_plan, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(email) DO UPDATE SET
             name=excluded.name,
             weight=excluded.weight,
@@ -124,7 +173,11 @@ def save_user_profile(email, name, weight, activity, goals, budget, calories, re
             restrictions=excluded.restrictions,
             diet=excluded.diet,
             location=excluded.location,
-            notes=excluded.notes,
+            avoid_ingredients=excluded.avoid_ingredients,
+            cravings=excluded.cravings,
+            complexity=excluded.complexity,
+            cuisines=excluded.cuisines,
+            portions_json=excluded.portions_json,
             last_plan=excluded.last_plan,
             updated_at=excluded.updated_at
         """,
@@ -146,6 +199,18 @@ def get_user_profile(email):
         return None
     profile = dict(row)
     profile["goals"] = parse_goals(profile.get("goals"))
+    profile["cuisines"] = parse_goals(profile.get("cuisines"))  # Parse cuisines list
+    
+    # Parse portions_json
+    portions_json = profile.get("portions_json")
+    if portions_json:
+        try:
+            profile["portions"] = json.loads(portions_json)
+        except:
+            profile["portions"] = None
+    else:
+        profile["portions"] = None
+    
     return profile
 
 
@@ -159,14 +224,18 @@ def render_profile_dashboard(profile):
         ("Name", profile.get("name") or "—"),
         ("Email", profile.get("email") or "—"),
         ("Weight", f"{profile.get('weight')} kg" if profile.get("weight") else "—"),
-        ("Activity", profile.get("activity") or "—"),
+        ("Activity", f"{profile.get('activity')} hrs/week" if profile.get("activity") else "—"),
         ("Diet", profile.get("diet") or "—"),
         ("Goals", ", ".join(profile.get("goals") or []) or "—"),
         ("Budget", f"{profile.get('budget')} CHF" if profile.get("budget") is not None else "—"),
         ("Calories", f"{profile.get('calories')} kcal" if profile.get("calories") is not None else "—"),
         ("Restrictions", profile.get("restrictions") or "—"),
         ("Location", profile.get("location") or "—"),
-        ("Notes", profile.get("notes") or "—"),
+        ("Avoid Ingredients", profile.get("avoid_ingredients") or "—"),
+        ("Cravings", profile.get("cravings") or "—"),
+        ("Complexity", profile.get("complexity") or "—"),
+        ("Cuisines", ", ".join(profile.get("cuisines") or []) or "—"),
+        ("Portions", "Custom per-meal settings saved" if profile.get("portions") else "Default (1 per meal)"),
         ("Updated", profile.get("updated_at") or "—"),
     ]
     for label, value in items:
@@ -204,50 +273,50 @@ def render_profile_dashboard(profile):
 init_db()
 
 # -------------------- GOOGLE ANALYTICS --------------------
+# Temporarily disabled to test if it's causing issues
+# GA_TAG = 'G-3R4901JN3H'
 
-GA_TAG = 'G-3R4901JN3H'
-
-app.index_string = """
-<!DOCTYPE html>
-<html>
-  <head>
-    <script async src="https://www.googletagmanager.com/gtag/js?id=G-3R4901JN3H"></script>
-    <script>
-      window.dataLayer = window.dataLayer || [];
-      function gtag(){dataLayer.push(arguments);}
-      gtag('js', new Date());
-      gtag('config', 'G-3R4901JN3H');
-
-      document.addEventListener('click', function(event) {
-        var elem = event.target;
-        var elementInfo = elem.tagName;
-        if (elem.id) elementInfo += ' #' + elem.id;
-        if (elem.className) elementInfo += ' .' + elem.className.toString().replace(/\s+/g, '.');
-        var timestamp = new Date().toISOString();
-
-        gtag('event', 'user_click', {
-            'event_category': 'User Interaction',
-            'event_label': elementInfo,
-            'event_timestamp': timestamp
-        });
-      });
-
-    </script>
-    {%metas%}
-    <title>{%title%}</title>
-    {%favicon%}
-    {%css%}
-  </head>
-  <body>
-    {%app_entry%}
-    <footer>
-      {%config%}
-      {%scripts%}
-      {%renderer%}
-    </footer>
-  </body>
-</html>
-"""
+# app.index_string = """
+# <!DOCTYPE html>
+# <html>
+#   <head>
+#     <script async src="https://www.googletagmanager.com/gtag/js?id=G-3R4901JN3H"></script>
+#     <script>
+#       window.dataLayer = window.dataLayer || [];
+#       function gtag(){dataLayer.push(arguments);}
+#       gtag('js', new Date());
+#       gtag('config', 'G-3R4901JN3H');
+#
+#       document.addEventListener('click', function(event) {
+#         var elem = event.target;
+#         var elementInfo = elem.tagName;
+#         if (elem.id) elementInfo += ' #' + elem.id;
+#         if (elem.className) elementInfo += ' .' + elem.className.toString().replace(/\s+/g, '.');
+#         var timestamp = new Date().toISOString();
+#
+#         gtag('event', 'user_click', {
+#             'event_category': 'User Interaction',
+#             'event_label': elementInfo,
+#             'event_timestamp': timestamp
+#         });
+#       });
+#
+#     </script>
+#     {%metas%}
+#     <title>{%title%}</title>
+#     {%favicon%}
+#     {%css%}
+#   </head>
+#   <body>
+#     {%app_entry%}
+#     <footer>
+#       {%config%}
+#       {%scripts%}
+#       {%renderer%}
+#     </footer>
+#   </body>
+# </html>
+# """
 # ---------------------Callbacks ---------------
 from recipes import sample_recipes, days, meal_times
 from helpers import rescale_day, normalize_mealplan, create_recipe_widget
@@ -263,12 +332,14 @@ default_headers = {"X-Title": os.getenv("OPENROUTER_APP_TITLE", "CULINAIRE")}
 if os.getenv("OPENROUTER_SITE_URL"):
     default_headers["HTTP-Referer"] = os.getenv("OPENROUTER_SITE_URL")
 
-base_url = (
-    os.getenv("OPENROUTER_BASE_URL")
-    or os.getenv("OPENAI_API_BASE")
-    or os.getenv("OPENAI_BASE_URL")
-    or "https://openrouter.ai/api/v1"
-)
+# Determine base URL based on which key is set
+if os.getenv("OPENROUTER_API_KEY"):
+    # Using OpenRouter
+    base_url = os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
+else:
+    # Using OpenAI directly
+    base_url = os.getenv("OPENAI_API_BASE") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+    default_headers = {}  # OpenAI doesn't need custom headers
 
 MIGROS_API_TOKEN = (
     os.getenv("MIGROS_API_TOKEN")
@@ -383,22 +454,51 @@ You are CULINAIRE, a precise and practical AI meal planner.
 Your output must be VALID JSON ONLY.
 Return a single JSON object with no code fences, markdown, or commentary.
 
-Include:
-- A 7-day meal plan with Breakfast, Lunch, and Dinner for EVERY day.
-- Keys for each meal must be lowercase: breakfast, lunch, dinner.
-- Each meal includes: meal (name), ingredients (as dict), calories (number), and a short recipe (1 sentence).
-- Total calories per day should match the user's target within ±5%.
-- A grocery_list section that combines all ingredients by item name, summed quantities, and category.
-- A summary with total weekly calories and estimated cost.
-- Do not use placeholder values like "None", "?", or "N/A". Provide realistic items and quantities.
-- Grocery list entries must have item, category, and quantity; category should be something like Produce, Dairy, Meat, Pantry, Bakery, Frozen, Beverages, etc.
+REQUIRED JSON STRUCTURE:
+{
+  "meal_plan": [
+    {"day": "Monday", "meals": {"breakfast": {...}, "lunch": {...}, "dinner": {...}}},
+    ... (7 days total)
+  ],
+  "grocery_list": [
+    {"item": "Eggs", "quantity": "12", "category": "Dairy"},
+    {"item": "Chicken breast", "quantity": "1 kg", "category": "Meat"},
+    ... (all ingredients summed)
+  ],
+  "summary": {
+    "average_daily_calories": 2400,
+    "estimated_weekly_cost": "CHF 150",
+    "nutrition_focus": "balanced"
+  }
+}
 
-Recipe description style (for the recipe field):
-- Describe only what is visibly present; do not mention anything unidentifiable.
-- Include color features (dominant colors; interwoven vs. unified), shape/texture (shredded, granular, smooth, rough), spatial arrangement (mixed, stacked, layered, wrapped), and fusion state (distinguishable, fully fused, placed on top).
-- Start with a step number (1., 2., etc.) and keep it to one sentence on one line.
-- Choose one interaction type and weave it into the sentence: Mix up, Blend, Put on, Cover, or No relationship.
-- Avoid extra commentary; keep it concise and vivid.
+MEAL PLAN REQUIREMENTS:
+- 7 days: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday (NOT Day 1, Day 2, etc.)
+- Keys for each meal must be lowercase: breakfast, lunch, dinner
+- Each meal includes: meal (name), ingredients (dict), calories (number), recipe (5-7 numbered steps)
+- Total calories per day should match the user's target within ±10%
+
+GROCERY LIST REQUIREMENTS (CRITICAL - DO NOT SKIP):
+- MUST include a grocery_list array with ALL ingredients from the week
+- Combine duplicate ingredients (e.g., if eggs appear in 5 meals, sum the quantities)
+- Account for portion multipliers (2 portions = double the ingredients)
+- Each entry MUST have: item, quantity, category
+- Categories: Produce, Dairy, Meat, Pantry, Bakery, Frozen, Beverages, Spices, etc.
+- Skip meals with 0 portions entirely from the grocery list
+
+IMPORTANT - Ingredient Quantities:
+- Use ROUNDED, practical quantities that are easy to measure (e.g., "200 g", "1 cup", "2 tbsp", "50 ml")
+- Avoid precise decimals like "47.3 g" or "1.7 cups" - round to nice numbers
+- Common rounded amounts: 50g, 100g, 150g, 200g, 250g, 1/2 cup, 1 cup, 1 tbsp, 2 tbsp, etc.
+- It's acceptable for total calories to vary ±10% from target to achieve rounded quantities
+
+Recipe instructions format (for the recipe field):
+- Provide 5-7 numbered steps with clear, actionable instructions
+- Each step should be specific (e.g., "Heat pan over medium heat for 2 minutes" not just "Heat pan")
+- Include timing when relevant (e.g., "Cook for 5 minutes", "Let rest for 10 minutes")
+- Include temperatures when relevant (e.g., "Preheat oven to 180°C")
+- Use action verbs: chop, dice, heat, stir, mix, cook, bake, season, serve
+- Format: "1. [action]. 2. [action]. 3. [action]..." all in one paragraph separated by spaces
 """
 
 @app.callback(
@@ -421,6 +521,10 @@ def toggle_calories_visibility(ignore_values):
     else:
         return {"display": "block"}
 
+
+# No callbacks needed for portion inputs - they're simple dcc.Input components
+
+
 def load_plan(json_text: str) -> dict:
     """Load JSON and normalize nested string JSON."""
     obj = json.loads(json_text)
@@ -431,64 +535,481 @@ def load_plan(json_text: str) -> dict:
     return obj
 
 
-def render_plan_view(plan: dict, target: float):
+def render_plan_view(plan: dict, target: float, portions: dict = None):
     days = normalize_mealplan(plan.get("meal_plan"))
     blocks = []
+    
+    # Default portions if not provided
+    if portions is None:
+        portions = {}
 
-    blocks.append(html.H3("Your Weekly Meal Plan 🍲"))
+    blocks.append(html.H3("Your Weekly Meal Plan 🍲", style={"marginBottom": "20px"}))
     day_totals = []
-    for day_name, day_dict in days:
+    
+    for day_idx, (day_name, day_dict) in enumerate(days):
         if not isinstance(day_dict, dict):
             continue
         day_dict = rescale_day(day_dict, target)
         total = sum(day_dict[m].get("calories",0) for m in ["breakfast","lunch","dinner"] if m in day_dict)
         day_totals.append(total)
-        meals_section = [html.H4(f"{day_name} — {round(total)} kcal (Target: {target})")]
+        
+        # Create meals content for this day - HORIZONTAL LAYOUT
+        meal_cards = []
         for m in ["breakfast","lunch","dinner"]:
-            if m not in day_dict: continue
+            if m not in day_dict: 
+                continue
             meal = day_dict[m]
-            meals_section.append(html.H5(f"{m.capitalize()} – {meal.get('meal', m)}"))
-            ing_list = [html.Li(f"{k}: {v}") for k,v in meal.get("ingredients", {}).items()]
-            meals_section.append(html.Ul(ing_list))
-            meals_section.append(html.P(f"{meal.get('recipe','')} (~{meal.get('calories','?')} kcal)"))
-        blocks.extend(meals_section)
-        blocks.append(html.Hr())
-
-    grocery = plan.get("grocery_list") or []
-    if isinstance(grocery, dict):
-        grocery = list(grocery.values())
-    if grocery:
-        blocks.append(html.H3("🛒 Grocery List"))
-        blocks.extend(
-            html.Li(f"{g.get('item')} ({g.get('category')}): {g.get('quantity')}")
-            for g in grocery
-            if isinstance(g, dict) and g.get("item")
+            
+            # Get portion count for this specific meal
+            portion_key = f"{day_name}_{m}"
+            portion_count = portions.get(portion_key, 1)
+            
+            # If portions = 0 OR meal is marked as "Skipped", show "No meal planned" instead of full card
+            if portion_count == 0 or meal.get('meal', '').lower() == 'skipped':
+                meal_card = html.Div([
+                    html.H5(m.capitalize(), style={"color": "#7f8c8d", "fontSize": "14px", "marginBottom": "8px", "textTransform": "uppercase", "letterSpacing": "0.5px"}),
+                    html.Div("No meal planned", style={"fontSize": "14px", "color": "#95a5a6", "fontStyle": "italic", "padding": "20px", "textAlign": "center"})
+                ], style={
+                    "flex": "1",
+                    "minWidth": "300px",
+                    "padding": "15px",
+                    "backgroundColor": "#f8f9fa",
+                    "border": "1px solid #e0e0e0",
+                    "borderRadius": "8px",
+                    "margin": "5px"
+                })
+                meal_cards.append(meal_card)
+                continue
+            
+            # Meal header with name, portions, and calories
+            meal_header = html.Div([
+                html.Span(meal.get('meal', m), style={"fontWeight": "bold", "fontSize": "16px", "color": "#2c3e50"}),
+                html.Span(f" • {portion_count} portion{'s' if portion_count != 1 else ''}", style={"fontSize": "13px", "color": "#3498db", "marginLeft": "8px", "fontWeight": "500"}),
+                html.Span(f" • {meal.get('calories','?')} kcal", style={"fontSize": "13px", "color": "#7f8c8d", "marginLeft": "8px"}),
+            ], style={"marginBottom": "10px"})
+            
+            # Ingredients in card grid
+            ingredient_cards = []
+            for ingredient, quantity in meal.get("ingredients", {}).items():
+                ingredient_cards.append(
+                    html.Div([
+                        html.Div(ingredient, style={"fontWeight": "bold", "fontSize": "13px", "color": "#2c3e50", "marginBottom": "4px"}),
+                        html.Div(quantity, style={"fontSize": "12px", "color": "#7f8c8d"}),
+                    ], style={
+                        "backgroundColor": "white",
+                        "border": "1px solid #ddd",
+                        "borderRadius": "6px",
+                        "padding": "10px",
+                        "minWidth": "120px",
+                        "display": "inline-block",
+                        "margin": "4px",
+                        "verticalAlign": "top"
+                    })
+                )
+            
+            ingredients_section = html.Div(ingredient_cards, style={"marginBottom": "12px"})
+            
+            # Recipe instructions
+            recipe_section = None
+            if meal.get('recipe'):
+                recipe_section = html.Div(
+                    meal.get('recipe',''), 
+                    style={
+                        "fontSize": "13px",
+                        "color": "#555", 
+                        "lineHeight": "1.6",
+                        "marginTop": "8px",
+                        "padding": "10px",
+                        "backgroundColor": "#f8f9fa",
+                        "borderRadius": "6px",
+                        "borderLeft": "3px solid #3498db"
+                    }
+                )
+            
+            # Create a card for this meal with unique ID
+            meal_card_id = f"meal-card-{day_idx}-{m}"
+            change_button_id = f"change-meal-{day_idx}-{m}"
+            
+            # Create a card for this meal
+            meal_card = html.Div([
+                html.Div([
+                    html.H5(m.capitalize(), style={"color": "#7f8c8d", "fontSize": "14px", "marginBottom": "8px", "textTransform": "uppercase", "letterSpacing": "0.5px", "display": "inline-block"}),
+                    dbc.Button(
+                        "🔀 Change",
+                        id=change_button_id,
+                        color="light",
+                        size="sm",
+                        n_clicks=0,
+                        style={"float": "right", "fontSize": "12px", "padding": "4px 10px"}
+                    ),
+                ], style={"marginBottom": "8px"}),
+                meal_header,
+                ingredients_section,
+                recipe_section if recipe_section else html.Div(),
+                # Store the meal data for regeneration
+                dcc.Store(id=f"meal-data-{day_idx}-{m}", data={
+                    "day_name": day_name,
+                    "meal_type": m,
+                    "target_calories": meal.get('calories', target // 3)
+                })
+            ], id=meal_card_id, style={
+                "flex": "1",
+                "minWidth": "300px",
+                "padding": "15px",
+                "backgroundColor": "#fff",
+                "border": "1px solid #e0e0e0",
+                "borderRadius": "8px",
+                "margin": "5px"
+            })
+            
+            meal_cards.append(meal_card)
+        
+        # Horizontal container for all meals
+        meals_content = [
+            html.Div(meal_cards, style={
+                "display": "flex",
+                "flexWrap": "wrap",
+                "gap": "10px",
+                "justifyContent": "space-between"
+            })
+        ]
+        
+        # Create collapsible card for this day
+        blocks.append(
+            dbc.Card([
+                dbc.CardHeader(
+                    html.Div([
+                        html.H4(f"{day_name} — {round(total)} kcal", className="mb-0", style={"display": "inline-block", "marginRight": "10px"}),
+                        html.Small(f"(Target: {target} kcal)", style={"color": "#666", "marginRight": "auto"}),
+                        dbc.Button(
+                            "Show/Hide",
+                            id=f"plan-day-toggle-{day_idx}",
+                            color="secondary",
+                            size="sm",
+                            n_clicks=0,
+                        ),
+                    ], style={"display": "flex", "alignItems": "center", "justifyContent": "space-between", "padding": "10px"}),
+                ),
+                dbc.Collapse(
+                    dbc.CardBody(meals_content),
+                    id=f"plan-day-collapse-{day_idx}",
+                    is_open=True,  # First day open by default
+                ),
+            ], style={"marginBottom": "10px", "borderRadius": "8px", "border": "1px solid #ddd"})
         )
 
+    # Grocery List Section - Editable
+    grocery = plan.get("grocery_list") or []
+    print(f"🛒 DEBUG: grocery_list from plan: {grocery}")
+    print(f"🛒 DEBUG: type: {type(grocery)}")
+    if isinstance(grocery, dict):
+        grocery = list(grocery.values())
+    
+    if grocery:
+        blocks.append(html.H3("🛒 Grocery List", style={"marginTop": "30px", "marginBottom": "15px"}))
+        
+        # Store grocery list data for editing
+        blocks.append(dcc.Store(id="grocery-list-store", data=grocery))
+        
+        # Editable grocery list
+        blocks.append(html.Div(id="grocery-list-items"))
+        
+        # Add item section
+        blocks.append(
+            dbc.Card([
+                dbc.CardBody([
+                    html.H5("Add Custom Item", style={"marginBottom": "15px"}),
+                    dbc.Row([
+                        dbc.Col([
+                            dbc.Label("Item Name"),
+                            dbc.Input(id="new-grocery-item", placeholder="e.g., Chocolate bars", type="text")
+                        ], width=4),
+                        dbc.Col([
+                            dbc.Label("Quantity"),
+                            dbc.Input(id="new-grocery-quantity", placeholder="e.g., 3 bars", type="text")
+                        ], width=3),
+                        dbc.Col([
+                            dbc.Label("Category"),
+                            dbc.Select(
+                                id="new-grocery-category",
+                                options=[
+                                    {"label": "Produce", "value": "Produce"},
+                                    {"label": "Dairy", "value": "Dairy"},
+                                    {"label": "Meat", "value": "Meat"},
+                                    {"label": "Pantry", "value": "Pantry"},
+                                    {"label": "Bakery", "value": "Bakery"},
+                                    {"label": "Frozen", "value": "Frozen"},
+                                    {"label": "Beverages", "value": "Beverages"},
+                                    {"label": "Snacks", "value": "Snacks"},
+                                    {"label": "Spices", "value": "Spices"},
+                                    {"label": "Other", "value": "Other"},
+                                ],
+                                value="Snacks"
+                            )
+                        ], width=3),
+                        dbc.Col([
+                            dbc.Label(" ", style={"display": "block"}),
+                            dbc.Button("Add Item", id="add-grocery-item", color="success", style={"width": "100%"})
+                        ], width=2),
+                    ])
+                ])
+            ], style={"marginTop": "15px", "marginBottom": "20px", "backgroundColor": "#f8f9fa"})
+        )
+
+    # Summary Section
     summary = plan.get("summary") or {}
     if not isinstance(summary, dict):
         summary = {}
     if not summary.get("average_daily_calories") and day_totals:
         summary["average_daily_calories"] = round(sum(day_totals)/len(day_totals))
-    blocks.append(html.H3("📋 Summary"))
-    blocks.append(html.P(f"Average daily calories: {summary.get('average_daily_calories','?')} kcal"))
-    blocks.append(html.P(f"Estimated weekly cost: {summary.get('estimated_weekly_cost','?')}"))
-    blocks.append(html.P(f"Nutrition focus: {summary.get('nutrition_focus','?')}"))
+    
+    blocks.append(
+        dbc.Card([
+            dbc.CardBody([
+                html.H3("📋 Summary", style={"marginBottom": "15px"}),
+                html.P([html.Strong("Average daily calories: "), f"{summary.get('average_daily_calories','?')} kcal"]),
+                html.P([html.Strong("Estimated weekly cost: "), f"{summary.get('estimated_weekly_cost','?')}"]),
+                html.P([html.Strong("Nutrition focus: "), f"{summary.get('nutrition_focus','?')}"]),
+            ])
+        ], style={"marginTop": "20px", "backgroundColor": "#f8f9fa", "border": "1px solid #dee2e6"})
+    )
+    
+    # Download PDF button
+    blocks.append(
+        html.Div([
+            dbc.Button(
+                "📥 Download PDF Summary",
+                id="download-pdf-button",
+                color="primary",
+                size="lg",
+                style={"marginTop": "30px", "width": "100%", "maxWidth": "400px"}
+            )
+        ], style={"textAlign": "center", "marginTop": "30px", "marginBottom": "40px"})
+    )
 
     return html.Div(blocks)
 
 
-def generate_plan(n, weight, activity, goals, budget, calories, restrictions, diet, location):
+# Callbacks for collapsible day sections in meal plan (7 days = 7 callbacks)
+for day_idx in range(7):
+    @app.callback(
+        Output(f"plan-day-collapse-{day_idx}", "is_open"),
+        Input(f"plan-day-toggle-{day_idx}", "n_clicks"),
+        State(f"plan-day-collapse-{day_idx}", "is_open"),
+        prevent_initial_call=True
+    )
+    def toggle_plan_day(n_clicks, is_open):
+        if not n_clicks:
+            raise PreventUpdate
+        return not is_open
+
+
+# Callbacks for changing individual meals (7 days x 3 meals = 21 callbacks)
+for day_idx in range(7):
+    for meal_type in ["breakfast", "lunch", "dinner"]:
+        @app.callback(
+            Output(f"meal-card-{day_idx}-{meal_type}", "children"),
+            Input(f"change-meal-{day_idx}-{meal_type}", "n_clicks"),
+            State(f"meal-data-{day_idx}-{meal_type}", "data"),
+            State("body_weight", "value"),
+            State("activity_hours", "value"),
+            State("goals", "value"),
+            State("restrictions", "value"),
+            State("diet_type", "value"),
+            prevent_initial_call=True
+        )
+        def change_single_meal(n_clicks, meal_data, weight, activity_hours, goals, restrictions, diet):
+            if not n_clicks or not meal_data:
+                raise PreventUpdate
+            
+            # Generate a new recipe for this specific meal
+            day_name = meal_data.get("day_name", "Monday")
+            meal_type = meal_data.get("meal_type", "breakfast")
+            target_calories = meal_data.get("target_calories", 400)
+            
+            prompt = f"""
+            Generate a single {meal_type} recipe as JSON with this exact structure:
+            {{
+                "meal": "Recipe Name",
+                "ingredients": {{"ingredient1": "quantity1", "ingredient2": "quantity2"}},
+                "calories": {target_calories},
+                "recipe": "1. Step one. 2. Step two. 3. Step three. 4. Step four. 5. Step five."
+            }}
+            
+            Requirements:
+            - For a {meal_type} meal
+            - Target calories: {target_calories} kcal (±10% is okay)
+            - Diet: {diet}
+            - Restrictions: {restrictions or 'None'}
+            - Use rounded quantities (50g, 100g, 1 cup, 2 tbsp, etc.)
+            - Provide 5-7 numbered steps with specific actions, timing, and temperatures
+            - Return ONLY valid JSON, no markdown or extra text
+            """
+            
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role":"system","content":"You are a recipe generator. Return only valid JSON."},
+                              {"role":"user","content":prompt}],
+                    response_format={"type": "json_object"},
+                )
+                raw_content = (response.choices[0].message.content or "").strip()
+                meal_data_new = json.loads(raw_content)
+                
+                # Render the new meal card
+                meal_header = html.Div([
+                    html.Span(meal_data_new.get('meal', meal_type), style={"fontWeight": "bold", "fontSize": "16px", "color": "#2c3e50"}),
+                    html.Span(f" • {meal_data_new.get('calories','?')} kcal", style={"fontSize": "13px", "color": "#7f8c8d", "marginLeft": "8px"}),
+                ], style={"marginBottom": "10px"})
+                
+                # Ingredients
+                ingredient_cards = []
+                for ingredient, quantity in meal_data_new.get("ingredients", {}).items():
+                    ingredient_cards.append(
+                        html.Div([
+                            html.Div(ingredient, style={"fontWeight": "bold", "fontSize": "13px", "color": "#2c3e50", "marginBottom": "4px"}),
+                            html.Div(quantity, style={"fontSize": "12px", "color": "#7f8c8d"}),
+                        ], style={
+                            "backgroundColor": "white",
+                            "border": "1px solid #ddd",
+                            "borderRadius": "6px",
+                            "padding": "10px",
+                            "minWidth": "120px",
+                            "display": "inline-block",
+                            "margin": "4px",
+                            "verticalAlign": "top"
+                        })
+                    )
+                
+                ingredients_section = html.Div(ingredient_cards, style={"marginBottom": "12px"})
+                
+                # Recipe
+                recipe_section = html.Div(
+                    meal_data_new.get('recipe',''), 
+                    style={
+                        "fontSize": "13px",
+                        "color": "#555", 
+                        "lineHeight": "1.6",
+                        "marginTop": "8px",
+                        "padding": "10px",
+                        "backgroundColor": "#f8f9fa",
+                        "borderRadius": "6px",
+                        "borderLeft": "3px solid #3498db"
+                    }
+                )
+                
+                # Return new card content
+                return [
+                    html.Div([
+                        html.H5(meal_type.capitalize(), style={"color": "#7f8c8d", "fontSize": "14px", "marginBottom": "8px", "textTransform": "uppercase", "letterSpacing": "0.5px", "display": "inline-block"}),
+                        dbc.Button(
+                            "🔀 Change",
+                            id=f"change-meal-{day_idx}-{meal_type}",
+                            color="light",
+                            size="sm",
+                            n_clicks=0,
+                            style={"float": "right", "fontSize": "12px", "padding": "4px 10px"}
+                        ),
+                    ], style={"marginBottom": "8px"}),
+                    meal_header,
+                    ingredients_section,
+                    recipe_section,
+                    dcc.Store(id=f"meal-data-{day_idx}-{meal_type}", data=meal_data)
+                ]
+                
+            except Exception as e:
+                return html.Div(f"Error regenerating recipe: {str(e)}", style={"color": "red"})
+
+
+def generate_plan(n, weight, activity_hours, goals, budget, calories, restrictions, diet, location, avoid_ingredients="", cravings="", complexity="medium", cuisines=None, portions=None):
+    # Default portions if not provided
+    if portions is None:
+        portions = {"breakfast": 1, "lunch": 1, "dinner": 1}
+    
+    # Build complexity description
+    complexity_desc = {
+        "quick": "Quick meals under 20 minutes",
+        "medium": "Medium complexity, 20-40 minutes",
+        "elaborate": "Elaborate recipes over 40 minutes",
+        "mixed": "Mix of quick, medium, and elaborate recipes"
+    }.get(complexity, "Medium complexity")
+    
+    # Build cuisine preference
+    cuisine_pref = ""
+    if cuisines and len(cuisines) > 0:
+        cuisine_pref = f"- Preferred cuisines: {', '.join(cuisines)}"
+    
+    # Build portions info - detailed per day and meal with calorie calculations
+    portions_lines = ["Portions per meal with calorie targets:"]
+    days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    
+    for day in days_list:
+        day_portions = []
+        meal_calories = {}
+        total_portions_for_day = 0
+        
+        # Calculate total portions for this day
+        for meal in ["breakfast", "lunch", "dinner"]:
+            key = f"{day}_{meal}"
+            p = portions.get(key, 1)
+            total_portions_for_day += p
+        
+        # Calculate calories per portion for this day
+        if total_portions_for_day > 0:
+            calories_per_portion = calories / total_portions_for_day
+        else:
+            calories_per_portion = 0
+        
+        # Build meal info with calorie targets
+        for meal in ["breakfast", "lunch", "dinner"]:
+            key = f"{day}_{meal}"
+            p = portions.get(key, 1)
+            if p == 0:
+                day_portions.append(f"{meal}: SKIP (0 kcal)")
+                meal_calories[meal] = 0
+            else:
+                target_cals = round(calories_per_portion * p)
+                day_portions.append(f"{meal}: {p}p (~{target_cals} kcal)")
+                meal_calories[meal] = target_cals
+        
+        portions_lines.append(f"  {day}: {', '.join(day_portions)}")
+    
+    portions_info = "\n".join(portions_lines)
+    
     user_prompt = f"""
     Create a 7-day meal plan for:
     - Body weight: {weight} kg
-    - Activity: {activity}
+    - Activity: {activity_hours} hours/week
     - Goals: {', '.join(goals or [])}
     - Diet: {diet}
     - Restrictions: {restrictions or 'None'}
     - Target calories: {calories} kcal/day
     - Budget: {budget} CHF
     - Location: {location}
+    - Complexity: {complexity_desc}
+    {f"- Ingredients to AVOID: {avoid_ingredients}" if avoid_ingredients else ""}
+    {f"- Foods user is craving: {cravings}" if cravings else ""}
+    {cuisine_pref}
+    {portions_info}
+    
+    IMPORTANT:
+    - Do NOT use any of these ingredients if specified: {avoid_ingredients or 'none'}
+    - CRAVINGS: Incorporate these foods in ONLY 1-2 meals during the ENTIRE week (not every day): {cravings or 'none'}. Use them sparingly as special treats or highlights, not as a base for every meal.
+    - Match the complexity level: {complexity_desc}
+    {f"- Favor these cuisines: {', '.join(cuisines or [])}" if cuisines else ""}
+    
+    CALORIE & PORTIONS HANDLING (CRITICAL):
+    - Each meal above shows its target calories based on portions (e.g., "breakfast: 2p (~800 kcal)" means 2 portions totaling 800 kcal)
+    - Match the calorie targets shown for each meal - they're calculated to sum to {calories} kcal per day
+    - For meals with 0 portions (marked "SKIP"): Set {{"meal": "Skipped", "calories": 0, "ingredients": {{}}, "recipe": "No meal planned"}}
+    - Scale ingredients proportionally to the calorie target (more portions = more ingredients to reach the higher calorie target)
+    
+    Example: If a day shows "breakfast: 2p (~800 kcal), lunch: 0p (SKIP), dinner: 1p (~400 kcal)":
+    - Breakfast should have ~800 kcal total (scaled for 2 people)
+    - Lunch should be skipped entirely
+    - Dinner should have ~400 kcal (for 1 person)
+    
+    GROCERY LIST: Sum up ALL ingredients across the week, accounting for the portion multipliers. Skip meals with 0 portions entirely.
     """
 
     raw_content = ""
@@ -505,14 +1026,14 @@ def generate_plan(n, weight, activity, goals, budget, calories, restrictions, di
         json_text = extract_json_block(raw_content)
         plan = load_plan(json_text)
         plan_payload = json_text
-        return render_plan_view(plan, calories), plan_payload
+        return render_plan_view(plan, calories, portions), plan_payload
     except json.JSONDecodeError as je:
         cleaned_text = clean_json_text(json_text)
         if cleaned_text != json_text:
             try:
                 plan = load_plan(cleaned_text)
                 plan_payload = cleaned_text
-                return render_plan_view(plan, calories), plan_payload
+                return render_plan_view(plan, calories, portions), plan_payload
             except json.JSONDecodeError:
                 pass
 
@@ -527,18 +1048,76 @@ def generate_plan(n, weight, activity, goals, budget, calories, restrictions, di
         return html.Div(f"Error: {type(e).__name__} – {e}", style={"color": "red"}), plan_payload or json_text or raw_content
 
 
-def generate_plan_hf(n, weight, activity, goals, budget, calories, restrictions, diet, location):
+def generate_plan_hf(n, weight, activity_hours, goals, budget, calories, restrictions, diet, location, avoid_ingredients="", cravings="", complexity="medium", cuisines=None, portions=None):
+    # Default portions if not provided
+    if portions is None:
+        portions = {"breakfast": 1, "lunch": 1, "dinner": 1}
+    
+    complexity_desc = {
+        "quick": "Quick meals under 20 minutes",
+        "medium": "Medium complexity, 20-40 minutes",
+        "elaborate": "Elaborate recipes over 40 minutes",
+        "mixed": "Mix of quick, medium, and elaborate recipes"
+    }.get(complexity, "Medium complexity")
+    
+    # Build portions info - detailed per day and meal with calorie calculations
+    portions_lines = ["Portions per meal with calorie targets:"]
+    days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    
+    for day in days_list:
+        day_portions = []
+        total_portions_for_day = 0
+        
+        # Calculate total portions for this day
+        for meal in ["breakfast", "lunch", "dinner"]:
+            key = f"{day}_{meal}"
+            p = portions.get(key, 1)
+            total_portions_for_day += p
+        
+        # Calculate calories per portion for this day
+        if total_portions_for_day > 0:
+            calories_per_portion = calories / total_portions_for_day
+        else:
+            calories_per_portion = 0
+        
+        # Build meal info with calorie targets
+        for meal in ["breakfast", "lunch", "dinner"]:
+            key = f"{day}_{meal}"
+            p = portions.get(key, 1)
+            if p == 0:
+                day_portions.append(f"{meal}: SKIP (0 kcal)")
+            else:
+                target_cals = round(calories_per_portion * p)
+                day_portions.append(f"{meal}: {p}p (~{target_cals} kcal)")
+        
+        portions_lines.append(f"  {day}: {', '.join(day_portions)}")
+    
+    portions_info = "\n".join(portions_lines)
+    
     user_prompt = f"""
     You are CULINAIRE. Create a 7-day meal plan as pure JSON only.
     Do NOT include the prompt or any text outside the JSON. No ellipses.
     - Body weight: {weight} kg
-    - Activity: {activity}
+    - Activity: {activity_hours} hours/week
     - Goals: {', '.join(goals or [])}
     - Diet: {diet}
     - Restrictions: {restrictions or 'None'}
     - Target calories: {calories} kcal/day
     - Budget: {budget} CHF
     - Location: {location}
+    - Complexity: {complexity_desc}
+    {f"- Avoid: {avoid_ingredients}" if avoid_ingredients else ""}
+    {f"- Cravings: {cravings}" if cravings else ""}
+    {f"- Cuisines: {', '.join(cuisines or [])}" if cuisines else ""}
+    {portions_info}
+    
+    CALORIE & PORTIONS HANDLING (CRITICAL):
+    - Each meal above shows its target calories (e.g., "breakfast: 2p (~800 kcal)" = 2 portions totaling 800 kcal)
+    - Match the calorie targets shown - they're calculated to sum to {calories} kcal per day
+    - For 0 portions (SKIP): Set {{"meal": "Skipped", "calories": 0, "ingredients": {{}}, "recipe": "No meal planned"}}
+    - Scale ingredients to match the calorie target
+    - CRAVINGS: Use cravings in ONLY 1-2 meals during the ENTIRE week, not every day
+    - GROCERY LIST: Sum all ingredients, skip 0-portion meals
 
     Return exactly this shape (no extra keys):
     {{
@@ -574,12 +1153,16 @@ def generate_plan_hf(n, weight, activity, goals, budget, calories, restrictions,
         json_text = extract_json_block(raw_content)
         plan = load_plan(json_text)
         plan_payload = json_text
-        return render_plan_view(plan, calories), plan_payload
+        return render_plan_view(plan, calories, portions), plan_payload
     except Exception as e:
         return html.Div(
             [
                 html.P(f"Error using HuggingFace model: {type(e).__name__} – {e}", style={"color": "red", "fontWeight": "bold"}),
-                html.Pre((raw_content or "")[:800], style={"whiteSpace": "pre-wrap", "background": "#f8f9fa", "padding": "10px"}),
+                html.P("⚠️ The HuggingFace model sometimes generates invalid JSON. Try the 'Generate My Weekly Plan' button instead for better results!", style={"color": "#856404", "backgroundColor": "#fff3cd", "padding": "10px", "borderRadius": "5px", "marginTop": "10px"}),
+                html.Details([
+                    html.Summary("Show raw output", style={"cursor": "pointer", "marginTop": "10px"}),
+                    html.Pre((raw_content or "")[:800], style={"whiteSpace": "pre-wrap", "background": "#f8f9fa", "padding": "10px"}),
+                ]),
             ]
         ), plan_payload or json_text or raw_content
 
@@ -1009,7 +1592,7 @@ def get_llama_agent():
 def render_chat(history):
     if not history:
         return html.Div("Ask me anything about meals, groceries, or nutrition.")
-    blocks = []
+        blocks = []
     for msg in history:
         role = msg.get("role")
         content = msg.get("content")
@@ -1074,10 +1657,11 @@ def chat_with_agent(user_message, history, plan_data, email, form_fields):
 @app.callback(
     Output("plan_output", "children"),
     Output("latest_plan_data", "data"),
+    Output("plan-data-store", "data"),
     Input("generate", "n_clicks"),
     Input("generate_hf", "n_clicks"),
     State("body_weight", "value"),
-    State("activity", "value"),
+    State("activity_hours", "value"),
     State("goals", "value"),
     State("budget", "value"),
     State("dayly_calories", "value"),
@@ -1088,29 +1672,78 @@ def chat_with_agent(user_message, history, plan_data, email, form_fields):
     State("calories_ignore", "value"),
     State("user_email", "value"),
     State("user_name", "value"),
-    State("user_notes", "value"),
+    State("avoid_ingredients", "value"),
+    State("cravings", "value"),
+    State("complexity", "value"),
+    State("cuisines", "value"),
+    State({"type": "portion", "day": ALL, "meal": ALL}, "value"),
 )
-def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity, goals, budget, calories, restrictions, diet, location, budget_ignore, calories_ignore, email, name, notes):
-    if not n_clicks and not n_clicks_hf:
+def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity_hours, goals, budget, calories, restrictions, diet, location, budget_ignore, calories_ignore, email, name, avoid_ingredients, cravings, complexity, cuisines, portion_values):
+    print(f"\n{'='*60}")
+    print(f"🔥 GENERATE CALLBACK FIRED!")
+    print(f"   n_clicks={n_clicks} (type: {type(n_clicks)})")
+    print(f"   n_clicks_hf={n_clicks_hf} (type: {type(n_clicks_hf)})")
+    print(f"   weight={weight}, activity_hours={activity_hours}")
+    print(f"   goals={goals}")
+    print(f"{'='*60}\n")
+    
+    if n_clicks is None and n_clicks_hf is None:
+        print("   ❌ PreventUpdate - both None")
+        raise PreventUpdate
+    
+    if (n_clicks or 0) == 0 and (n_clicks_hf or 0) == 0:
+        print("   ❌ PreventUpdate - both zero")
         raise PreventUpdate
 
     ctx = callback_context
     trigger = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
+    print(f"   ✅ Trigger: {trigger}")
 
     budget_value = budget if "ignore" not in (budget_ignore or []) else "Not specified"
     calorie_target = calories if "ignore" not in (calories_ignore or []) else 2400
+    
+    # Parse portions - portion_values is a list from pattern-matching callback
+    # We need to reconstruct the portions dict with day and meal info
+    # The order is: Mon-Breakfast, Tue-Breakfast, ..., Sun-Breakfast, Mon-Lunch, ..., Sun-Dinner
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    meals = ["breakfast", "lunch", "dinner"]
+    
+    print(f"   📊 Portion values received: {portion_values}")
+    print(f"   📊 Length: {len(portion_values) if portion_values else 0}")
+    
+    portions = {}
+    if portion_values and len(portion_values) == 21:  # 7 days × 3 meals
+        idx = 0
+        for meal in meals:
+            for day in days:
+                # Convert to int, default to 1 if None or empty
+                val = portion_values[idx]
+                portions[f"{day}_{meal}"] = int(val) if (val is not None and val != '') else 1
+                idx += 1
+    else:
+        # Default: all meals = 1 portion
+        for day in days:
+            for meal in meals:
+                portions[f"{day}_{meal}"] = 1
+    
+    print(f"   📊 Parsed portions: {portions}")
 
     if trigger == "generate_hf":
         plan_view, plan_raw = generate_plan_hf(
             n_clicks_hf,
             weight,
-            activity,
+            activity_hours,
             goals or [],
             budget_value,
             calorie_target,
             restrictions or "None",
             diet,
             location or "Not specified",
+            avoid_ingredients or "",
+            cravings or "",
+            complexity or "medium",
+            cuisines or [],
+            portions,
         )
 
         plan_data = {
@@ -1119,23 +1752,28 @@ def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity, goals, budget,
             "generated_at": datetime.utcnow().isoformat(),
             "email": email,
             "name": name,
-            "notes": notes,
             "weight": weight,
             "calorie_target": calorie_target,
+            "portions": portions,
         }
         plan_data = enrich_plan_with_migros(plan_data)
-        return plan_view, plan_data
+        return plan_view, plan_data, plan_data
 
     plan_view, plan_raw = generate_plan(
         n_clicks,
         weight,
-        activity,
+        activity_hours,
         goals or [],
         budget_value,
         calorie_target,
         restrictions or "None",
         diet,
         location or "Not specified",
+        avoid_ingredients or "",
+        cravings or "",
+        complexity or "medium",
+        cuisines or [],
+        portions,
     )
     plan_data = {
         "raw_json": plan_raw,
@@ -1143,12 +1781,12 @@ def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity, goals, budget,
         "generated_at": datetime.utcnow().isoformat(),
         "email": email,
         "name": name,
-        "notes": notes,
         "weight": weight,
         "calorie_target": calorie_target,
+        "portions": portions,
     }
     plan_data = enrich_plan_with_migros(plan_data)
-    return plan_view, plan_data
+    return plan_view, plan_data, plan_data
 
 
 @app.callback(
@@ -1160,17 +1798,21 @@ def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity, goals, budget,
     State("user_email", "value"),
     State("user_name", "value"),
     State("body_weight", "value"),
-    State("activity", "value"),
+    State("activity_hours", "value"),
     State("goals", "value"),
     State("budget", "value"),
     State("dayly_calories", "value"),
     State("restrictions", "value"),
     State("diet_type", "value"),
     State("location", "value"),
-    State("user_notes", "value"),
+    State("avoid_ingredients", "value"),
+    State("cravings", "value"),
+    State("complexity", "value"),
+    State("cuisines", "value"),
+    State({"type": "portion", "day": ALL, "meal": ALL}, "value"),
     prevent_initial_call=True,
 )
-def persist_profile(plan_data, save_clicks, load_clicks, email, name, weight, activity, goals, budget, calories, restrictions, diet, location, notes):
+def persist_profile(plan_data, save_clicks, load_clicks, email, name, weight, activity_hours, goals, budget, calories, restrictions, diet, location, avoid_ingredients, cravings, complexity, cuisines, portion_values):
     ctx = callback_context
     if not ctx.triggered:
         raise PreventUpdate
@@ -1190,20 +1832,37 @@ def persist_profile(plan_data, save_clicks, load_clicks, email, name, weight, ac
         last_plan = plan_data.get("raw_json")
     elif isinstance(plan_data, str):
         last_plan = plan_data
+    
+    # Parse portions from pattern-matching callback
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    meals = ["breakfast", "lunch", "dinner"]
+    portions = {}
+    if portion_values and len(portion_values) == 21:
+        idx = 0
+        for meal in meals:
+            for day in days:
+                # Handle 0 portions correctly - only default to 1 if None or empty string
+                val = portion_values[idx]
+                portions[f"{day}_{meal}"] = int(val) if (val is not None and val != '') else 1
+                idx += 1
 
     save_user_profile(
         email=email,
         name=name,
         weight=weight,
-        activity=activity,
+        activity_hours=activity_hours,
         goals=goals or [],
         budget=budget,
         calories=calories,
         restrictions=restrictions,
         diet=diet,
         location=location,
-        notes=notes,
+        avoid_ingredients=avoid_ingredients,
+        cravings=cravings,
+        complexity=complexity,
+        cuisines=cuisines or [],
         last_plan=last_plan,
+        portions=portions if portions else None,
     )
     profile = get_user_profile(email)
     msg = "Profile auto-saved with your latest plan." if trigger == "latest_plan_data" else "Profile saved."
@@ -1213,14 +1872,18 @@ def persist_profile(plan_data, save_clicks, load_clicks, email, name, weight, ac
 @app.callback(
     Output("user_name", "value"),
     Output("body_weight", "value"),
-    Output("activity", "value"),
+    Output("activity_hours", "value"),
     Output("goals", "value"),
     Output("budget", "value"),
     Output("dayly_calories", "value"),
     Output("restrictions", "value"),
     Output("diet_type", "value"),
     Output("location", "value"),
-    Output("user_notes", "value"),
+    Output("avoid_ingredients", "value"),
+    Output("cravings", "value"),
+    Output("complexity", "value"),
+    Output("cuisines", "value"),
+    Output({"type": "portion", "day": ALL, "meal": ALL}, "value"),
     Input("load_profile", "n_clicks"),
     State("user_email", "value"),
     prevent_initial_call=True,
@@ -1231,7 +1894,18 @@ def populate_profile_fields(n_clicks, email):
 
     profile = get_user_profile(email)
     if not profile:
-        return (no_update,) * 10
+        return (no_update,) * 14  # 13 fields + portions list
+
+    # Build portions list in the correct order
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    meals = ["breakfast", "lunch", "dinner"]
+    portions_dict = profile.get("portions") or {}
+    portion_values = []
+    
+    for meal in meals:
+        for day in days:
+            key = f"{day}_{meal}"
+            portion_values.append(portions_dict.get(key, 1))
 
     return (
         profile.get("name"),
@@ -1243,7 +1917,11 @@ def populate_profile_fields(n_clicks, email):
         profile.get("restrictions"),
         profile.get("diet"),
         profile.get("location"),
-        profile.get("notes"),
+        profile.get("avoid_ingredients"),
+        profile.get("cravings"),
+        profile.get("complexity"),
+        profile.get("cuisines"),
+        portion_values,
     )
 
 
@@ -1258,7 +1936,7 @@ def populate_profile_fields(n_clicks, email):
     State("body_weight", "value"),
     State("budget", "value"),
     State("dayly_calories", "value"),
-    State("activity", "value"),
+    State("activity_hours", "value"),
     State("diet_type", "value"),
     State("location", "value"),
     State("goals", "value"),
@@ -1267,7 +1945,7 @@ def populate_profile_fields(n_clicks, email):
     State("calories_ignore", "value"),
     prevent_initial_call=True,
 )
-def handle_chat(n_clicks, user_message, history, plan_data, email, weight, budget, calories, activity, diet, location, goals, restrictions, budget_ignore, calories_ignore):
+def handle_chat(n_clicks, user_message, history, plan_data, email, weight, budget, calories, activity_hours, diet, location, goals, restrictions, budget_ignore, calories_ignore):
     if not n_clicks or not user_message:
         raise PreventUpdate
 
@@ -1277,7 +1955,7 @@ def handle_chat(n_clicks, user_message, history, plan_data, email, weight, budge
             weight,
             budget,
             calories,
-            activity,
+            activity_hours,
             diet,
             location,
             goals,
@@ -1354,6 +2032,314 @@ for recipe in sample_recipes:
             # This requires state for all stars; better handled with pattern matching callbacks but limited here
             # So keep this a placeholder or consider a JS front-end implementation for fully interactive stars
             return "★"  # filled star on click for user feedback
+
+
+# -------------------- GROCERY LIST EDITING CALLBACKS --------------------
+
+@app.callback(
+    Output("grocery-list-items", "children"),
+    Input("grocery-list-store", "data"),
+)
+def render_grocery_list(grocery_data):
+    """Render the editable grocery list with remove buttons."""
+    if not grocery_data:
+        return html.P("No items in grocery list", style={"color": "#999", "fontStyle": "italic"})
+    
+    # Group by category
+    categorized = {}
+    for item in grocery_data:
+        if isinstance(item, dict) and item.get("item"):
+            cat = item.get("category", "Other")
+            if cat not in categorized:
+                categorized[cat] = []
+            categorized[cat].append(item)
+    
+    # Render items by category
+    category_sections = []
+    for category in sorted(categorized.keys()):
+        items = categorized[category]
+        item_elements = []
+        
+        for idx, item in enumerate(items):
+            item_id = f"{category}_{idx}_{item['item'].replace(' ', '_')}"
+            item_elements.append(
+                html.Div([
+                    html.Div([
+                        html.Strong(item['item'], style={"fontSize": "14px"}),
+                        html.Span(f" — {item['quantity']}", style={"fontSize": "13px", "color": "#666", "marginLeft": "8px"}),
+                    ], style={"flex": "1"}),
+                    dbc.Button(
+                        "✕",
+                        id={"type": "remove-grocery", "index": item_id},
+                        color="danger",
+                        size="sm",
+                        outline=True,
+                        style={"padding": "2px 8px", "fontSize": "12px"}
+                    )
+                ], style={
+                    "display": "flex",
+                    "alignItems": "center",
+                    "justifyContent": "space-between",
+                    "padding": "8px 12px",
+                    "marginBottom": "5px",
+                    "backgroundColor": "white",
+                    "border": "1px solid #ddd",
+                    "borderRadius": "4px"
+                })
+            )
+        
+        category_sections.append(
+            html.Div([
+                html.H6(category, style={"color": "#666", "fontSize": "12px", "textTransform": "uppercase", "marginBottom": "8px", "marginTop": "15px"}),
+                html.Div(item_elements)
+            ])
+        )
+    
+    return html.Div(category_sections)
+
+
+@app.callback(
+    Output("grocery-list-store", "data", allow_duplicate=True),
+    Input("add-grocery-item", "n_clicks"),
+    State("new-grocery-item", "value"),
+    State("new-grocery-quantity", "value"),
+    State("new-grocery-category", "value"),
+    State("grocery-list-store", "data"),
+    prevent_initial_call=True
+)
+def add_grocery_item(n_clicks, new_item, new_qty, new_cat, grocery_data):
+    """Add a new item to the grocery list."""
+    if not n_clicks or not new_item or not new_qty:
+        raise PreventUpdate
+    
+    if not grocery_data:
+        grocery_data = []
+    
+    grocery_data.append({
+        "item": new_item,
+        "quantity": new_qty,
+        "category": new_cat or "Other"
+    })
+    
+    print(f"✅ Added item to grocery list: {new_item} - {new_qty}")
+    return grocery_data
+
+
+@app.callback(
+    Output("grocery-list-store", "data", allow_duplicate=True),
+    Input({"type": "remove-grocery", "index": ALL}, "n_clicks"),
+    State("grocery-list-store", "data"),
+    prevent_initial_call=True
+)
+def remove_grocery_item(remove_clicks, grocery_data):
+    """Remove an item from the grocery list."""
+    ctx = callback_context
+    if not ctx.triggered or not grocery_data:
+        raise PreventUpdate
+    
+    # Find which button was clicked
+    triggered_id = ctx.triggered[0]["prop_id"]
+    if "remove-grocery" not in triggered_id:
+        raise PreventUpdate
+    
+    # Extract the item identifier from the button ID
+    import json as json_lib
+    button_id = json_lib.loads(triggered_id.split(".")[0])
+    item_id = button_id["index"]
+    
+    # Parse the item_id to get category and item name
+    parts = item_id.split("_", 2)
+    if len(parts) >= 3:
+        category = parts[0]
+        item_name = parts[2].replace("_", " ")
+        
+        # Remove the item from grocery_data
+        grocery_data = [
+            item for item in grocery_data
+            if not (item.get("category") == category and item.get("item") == item_name)
+        ]
+    
+    return grocery_data
+
+
+@app.callback(
+    Output("new-grocery-item", "value"),
+    Output("new-grocery-quantity", "value"),
+    Input("add-grocery-item", "n_clicks"),
+    prevent_initial_call=True
+)
+def clear_add_item_inputs(n_clicks):
+    """Clear the add item inputs after adding."""
+    return "", ""
+
+
+# -------------------- PDF GENERATION --------------------
+
+def generate_meal_plan_pdf(plan_data, grocery_list):
+    """Generate a PDF with calendar view of meal plan and grocery list."""
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
+    story = []
+    styles = getSampleStyleSheet()
+    
+    # Custom styles
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        textColor=colors.HexColor('#2c3e50'),
+        spaceAfter=30,
+        alignment=TA_CENTER
+    )
+    
+    heading_style = ParagraphStyle(
+        'CustomHeading',
+        parent=styles['Heading2'],
+        fontSize=16,
+        textColor=colors.HexColor('#34495e'),
+        spaceAfter=12,
+        spaceBefore=20
+    )
+    
+    # Title
+    story.append(Paragraph("🍽️ CULINAIRE - Weekly Meal Plan", title_style))
+    story.append(Spacer(1, 0.3*inch))
+    
+    # Parse the plan
+    try:
+        if isinstance(plan_data, str):
+            plan = json.loads(plan_data)
+        elif isinstance(plan_data, dict):
+            raw = plan_data.get("raw_json")
+            if raw:
+                plan = json.loads(raw) if isinstance(raw, str) else raw
+            else:
+                plan = plan_data
+        else:
+            plan = {}
+        
+        meal_plan = plan.get("meal_plan", [])
+        portions = plan_data.get("portions", {}) if isinstance(plan_data, dict) else {}
+        
+        # Calendar view - 7 days
+        days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        days_data = normalize_mealplan(meal_plan)
+        
+        for day_name, meals in days_data:
+            story.append(Paragraph(f"<b>{day_name}</b>", heading_style))
+            
+            # Create table for the day's meals
+            day_table_data = [["Meal", "Recipe", "Calories"]]
+            
+            for meal_type in ["breakfast", "lunch", "dinner"]:
+                meal = meals.get(meal_type, {})
+                portion_key = f"{day_name}_{meal_type}"
+                portion_count = portions.get(portion_key, 1)
+                
+                if portion_count == 0 or meal.get('meal', '').lower() == 'skipped':
+                    day_table_data.append([
+                        meal_type.capitalize(),
+                        "No meal planned",
+                        "0 kcal"
+                    ])
+                else:
+                    meal_name = meal.get('meal', meal_type.capitalize())
+                    calories = meal.get('calories', '?')
+                    portion_text = f" ({portion_count}p)" if portion_count > 1 else ""
+                    day_table_data.append([
+                        meal_type.capitalize(),
+                        f"{meal_name}{portion_text}",
+                        f"{calories} kcal"
+                    ])
+            
+            day_table = Table(day_table_data, colWidths=[1.5*inch, 4*inch, 1.5*inch])
+            day_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#3498db')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 12),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 1), (-1, -1), 10),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8f9fa')]),
+            ]))
+            story.append(day_table)
+            story.append(Spacer(1, 0.2*inch))
+        
+        # Page break before grocery list
+        story.append(PageBreak())
+        
+        # Grocery List
+        story.append(Paragraph("🛒 Grocery List", title_style))
+        story.append(Spacer(1, 0.2*inch))
+        
+        if grocery_list:
+            # Group by category
+            categorized = {}
+            for item in grocery_list:
+                if isinstance(item, dict) and item.get("item"):
+                    cat = item.get("category", "Other")
+                    if cat not in categorized:
+                        categorized[cat] = []
+                    categorized[cat].append(item)
+            
+            for category in sorted(categorized.keys()):
+                story.append(Paragraph(f"<b>{category}</b>", heading_style))
+                items = categorized[category]
+                
+                grocery_table_data = []
+                for item in items:
+                    grocery_table_data.append([
+                        f"• {item['item']}",
+                        item.get('quantity', '')
+                    ])
+                
+                grocery_table = Table(grocery_table_data, colWidths=[4.5*inch, 2.5*inch])
+                grocery_table.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 11),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                    ('TOPPADDING', (0, 0), (-1, -1), 8),
+                ]))
+                story.append(grocery_table)
+                story.append(Spacer(1, 0.15*inch))
+        
+    except Exception as e:
+        story.append(Paragraph(f"Error generating PDF: {str(e)}", styles['Normal']))
+    
+    # Build PDF
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+
+@app.callback(
+    Output("download-pdf", "data"),
+    Input("download-pdf-button", "n_clicks"),
+    State("plan-data-store", "data"),
+    State("grocery-list-store", "data"),
+    prevent_initial_call=True
+)
+def download_pdf(n_clicks, plan_data, grocery_list):
+    """Generate and download the PDF."""
+    if not n_clicks or not plan_data:
+        raise PreventUpdate
+    
+    print(f"📥 PDF Download - Grocery list items: {len(grocery_list) if grocery_list else 0}")
+    print(f"📥 PDF Download - Grocery list: {grocery_list}")
+    
+    try:
+        pdf_buffer = generate_meal_plan_pdf(plan_data, grocery_list)
+        return dcc.send_bytes(pdf_buffer.getvalue(), "CULINAIRE_Meal_Plan.pdf")
+    except Exception as e:
+        print(f"Error generating PDF: {e}")
+        import traceback
+        traceback.print_exc()
+        raise PreventUpdate
 
 
 # -------------------- MAIN --------------------
