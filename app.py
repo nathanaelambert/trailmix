@@ -21,6 +21,13 @@ from layout import layout
 app.layout = layout
 load_dotenv()  # load env vars from .env if present
 
+ACTIVITY_OPTIONS = ["Sedentary","Lightly active","Moderately active","Very active","Extra active"]
+DIET_OPTIONS = ["Omnivore","Vegetarian","Keto","Vegan","Pescatarian","Gluten free","Other"]
+GOALS_OPTIONS = [
+    "Lose weight","Build muscle","Maintain muscle mass",
+    "Reduce meat consumption","Discover new recipes","Reduce processed food consumption",
+]
+
 # -------------------- USER DATA STORAGE --------------------
 
 DB_PATH = os.getenv("USER_DB_PATH", "user_profiles.db")
@@ -587,6 +594,43 @@ def latest_plan_summary(plan_data):
     return f"Latest meal plan JSON (truncated): {snippet}"
 
 
+def build_user_context(email, profile, plan_data, fields):
+    """Bundle profile + live form selections for the chat agent."""
+    weight, budget, calories, activity, diet, location, goals, restrictions, budget_ignore, calories_ignore = fields
+    context_lines = []
+    if email:
+        context_lines.append(f"Current email: {email}")
+    if profile:
+        context_lines.append("Saved profile available (already merged).")
+
+    def fmt_val(label, value):
+        if value is None or value == "":
+            return f"{label}: Not specified"
+        return f"{label}: {value}"
+
+    context_lines.extend([
+        fmt_val("Weight (kg)", weight),
+        fmt_val("Weekly budget (CHF)", "Not specified" if ("ignore" in (budget_ignore or [])) else budget),
+        fmt_val("Calories/day target", "Compute for me" if ("ignore" in (calories_ignore or [])) else calories),
+        fmt_val("Activity", activity),
+        fmt_val("Diet type", diet),
+        fmt_val("Location", location),
+        fmt_val("Goals", ", ".join(goals or [])),
+        fmt_val("Restrictions", restrictions),
+    ])
+
+    # Include choice lists so the agent can guide users
+    context_lines.append(f"Available activity options: {', '.join(ACTIVITY_OPTIONS)}")
+    context_lines.append(f"Available diet options: {', '.join(DIET_OPTIONS)}")
+    context_lines.append(f"Available goals (multi-select): {', '.join(GOALS_OPTIONS)}")
+
+    plan_text = latest_plan_summary(plan_data)
+    if plan_text:
+        context_lines.append(plan_text)
+
+    return "\n".join(context_lines)
+
+
 @lru_cache(maxsize=1)
 def get_llama_agent():
     llm = LlamaOpenAI(
@@ -630,7 +674,7 @@ def render_chat(history):
     return blocks
 
 
-def chat_with_agent(user_message, history, plan_data, email):
+def chat_with_agent(user_message, history, plan_data, email, form_fields):
     agent = get_llama_agent()
     profile = get_user_profile(email) if email else None
 
@@ -645,7 +689,7 @@ def chat_with_agent(user_message, history, plan_data, email):
     profile_text = ""
     if profile:
         profile_text = f"""
-        User profile:
+        Saved profile:
         - Name: {profile.get('name')}
         - Weight: {profile.get('weight')}
         - Activity: {profile.get('activity')}
@@ -655,11 +699,11 @@ def chat_with_agent(user_message, history, plan_data, email):
         - Location: {profile.get('location')}
         """
 
-    plan_text = latest_plan_summary(plan_data)
+    form_context = build_user_context(email, profile, plan_data, form_fields)
 
     prompt = f"""
     {profile_text}
-    {plan_text}
+    {form_context}
     Recent chat:
     {history_text}
 
@@ -853,15 +897,37 @@ def populate_profile_fields(n_clicks, email):
     State("chat_history", "data"),
     State("latest_plan_data", "data"),
     State("user_email", "value"),
+    State("body_weight", "value"),
+    State("budget", "value"),
+    State("dayly_calories", "value"),
+    State("activity", "value"),
+    State("diet_type", "value"),
+    State("location", "value"),
+    State("goals", "value"),
+    State("restrictions", "value"),
+    State("budget_ignore", "value"),
+    State("calories_ignore", "value"),
     prevent_initial_call=True,
 )
-def handle_chat(n_clicks, user_message, history, plan_data, email):
+def handle_chat(n_clicks, user_message, history, plan_data, email, weight, budget, calories, activity, diet, location, goals, restrictions, budget_ignore, calories_ignore):
     if not n_clicks or not user_message:
         raise PreventUpdate
 
     history = history or []
     try:
-        answer = chat_with_agent(user_message, history, plan_data, email)
+        form_fields = (
+            weight,
+            budget,
+            calories,
+            activity,
+            diet,
+            location,
+            goals,
+            restrictions,
+            budget_ignore,
+            calories_ignore,
+        )
+        answer = chat_with_agent(user_message, history, plan_data, email, form_fields)
     except Exception as e:
         answer = f"Sorry, the chat agent ran into an error: {e}"
 
