@@ -6,6 +6,12 @@ import sqlite3
 import json
 from dotenv import load_dotenv
 from datetime import datetime
+import requests
+from duckduckgo_search import DDGS
+
+from llama_index.llms.openai import OpenAI as LlamaOpenAI
+from llama_index.core.tools import FunctionTool
+from llama_index.core.agent import ReActAgent
 
 app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
 
@@ -539,6 +545,132 @@ def generate_plan_hf(n, weight, activity, goals, budget, calories, restrictions,
         ), plan_payload or json_text or raw_content
 
 
+# -------------------- CHATBOT (LLamaIndex Agent) --------------------
+
+CHAT_SYSTEM_PROMPT = """
+You are CULINAIRE Chat, a helpful culinary assistant.
+- Use the web_search tool whenever the user asks for current information, product options, or evidence. Cite URLs.
+- Keep answers concise and organized; include short bullet references with source URLs.
+- Blend in the user's profile or latest meal plan if provided.
+"""
+
+
+def web_search(query: str, max_results: int = 3) -> str:
+    """Search the web and return a compact JSON-like string of results."""
+    if not query:
+        return "[]"
+    results = []
+    try:
+        with DDGS() as ddgs:
+            for item in ddgs.text(query, max_results=max_results):
+                if not item:
+                    continue
+                results.append(
+                    {
+                        "title": item.get("title"),
+                        "url": item.get("href"),
+                        "snippet": item.get("body"),
+                    }
+                )
+    except Exception as e:
+        return json.dumps([{"error": f"search_failed: {e}"}])
+    return json.dumps(results)
+
+
+def latest_plan_summary(plan_data):
+    if not isinstance(plan_data, dict):
+        return ""
+    raw = plan_data.get("raw_json")
+    if not raw:
+        return ""
+    snippet = raw if len(raw) < 1200 else raw[:1200] + "..."
+    return f"Latest meal plan JSON (truncated): {snippet}"
+
+
+@lru_cache(maxsize=1)
+def get_llama_agent():
+    llm = LlamaOpenAI(
+        model="gpt-4o-mini",
+        api_key=api_key,
+        base_url=base_url,
+        default_headers=default_headers,
+        temperature=0.3,
+    )
+    search_tool = FunctionTool.from_defaults(
+        fn=web_search,
+        name="web_search",
+        description="Search the web and return a list of results with title, url, and snippet.",
+    )
+    return ReActAgent.from_tools(
+        [search_tool],
+        llm=llm,
+        system_prompt=CHAT_SYSTEM_PROMPT,
+        verbose=False,
+    )
+
+
+def render_chat(history):
+    if not history:
+        return html.Div("Ask me anything about meals, groceries, or nutrition.")
+    blocks = []
+    for msg in history:
+        role = msg.get("role")
+        content = msg.get("content")
+        if not content:
+            continue
+        style = {
+            "background": "#fff3cd" if role == "assistant" else "#e2e3e5",
+            "padding": "10px",
+            "borderRadius": "8px",
+            "marginBottom": "8px",
+            "border": "1px solid #dee2e6",
+        }
+        label = "AI" if role == "assistant" else "You"
+        blocks.append(html.Div([html.Strong(f"{label}: "), html.Span(content)], style=style))
+    return blocks
+
+
+def chat_with_agent(user_message, history, plan_data, email):
+    agent = get_llama_agent()
+    profile = get_user_profile(email) if email else None
+
+    history_text = ""
+    if history:
+        trimmed = history[-6:]  # keep recent context
+        pairs = []
+        for h in trimmed:
+            pairs.append(f"{h.get('role')}: {h.get('content')}")
+        history_text = "\n".join(pairs)
+
+    profile_text = ""
+    if profile:
+        profile_text = f"""
+        User profile:
+        - Name: {profile.get('name')}
+        - Weight: {profile.get('weight')}
+        - Activity: {profile.get('activity')}
+        - Diet: {profile.get('diet')}
+        - Goals: {', '.join(profile.get('goals') or [])}
+        - Restrictions: {profile.get('restrictions')}
+        - Location: {profile.get('location')}
+        """
+
+    plan_text = latest_plan_summary(plan_data)
+
+    prompt = f"""
+    {profile_text}
+    {plan_text}
+    Recent chat:
+    {history_text}
+
+    User question: {user_message}
+    Remember: cite sources with URLs. Use web_search tool for up-to-date or factual items.
+    """
+
+    response = agent.chat(prompt)
+    return getattr(response, "response", str(response))
+
+
 @app.callback(
     Output("plan_output", "children"),
     Output("latest_plan_data", "data"),
@@ -711,6 +843,34 @@ def populate_profile_fields(n_clicks, email):
         profile.get("location"),
         profile.get("notes"),
     )
+
+
+@app.callback(
+    Output("chat_output", "children"),
+    Output("chat_history", "data"),
+    Input("send_chat", "n_clicks"),
+    State("chat_input", "value"),
+    State("chat_history", "data"),
+    State("latest_plan_data", "data"),
+    State("user_email", "value"),
+    prevent_initial_call=True,
+)
+def handle_chat(n_clicks, user_message, history, plan_data, email):
+    if not n_clicks or not user_message:
+        raise PreventUpdate
+
+    history = history or []
+    try:
+        answer = chat_with_agent(user_message, history, plan_data, email)
+    except Exception as e:
+        answer = f"Sorry, the chat agent ran into an error: {e}"
+
+    updated_history = history + [
+        {"role": "user", "content": user_message},
+        {"role": "assistant", "content": answer},
+    ]
+    return render_chat(updated_history), updated_history
+
 
 @app.callback(
     Output("test_recipes_output", "children"),

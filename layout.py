@@ -128,5 +128,25 @@ layout = html.Div([
     html.Div(id="test_recipes_output", style={"maxWidth": "600px", "margin": "40px auto"}),
 
     html.Div(id="plan_output", style={"marginTop": "40px", "maxWidth": "600px", "margin": "auto"}),
-    dcc.Store(id="latest_plan_data")
+    html.Hr(),
+    html.Div([
+        html.H3("Chat with CULINAIRE"),
+        html.P("Ask about meal ideas, grocery tips, or nutrition. The assistant can search the web and cite sources.", style={"color": "#6c757d"}),
+        dcc.Textarea(
+            id="chat_input",
+            placeholder="Ask anything about meals, groceries, nutrition...",
+            style={"width": "100%", "height": "80px", "marginBottom": "10px"}
+        ),
+        html.Button("Send", id="send_chat", n_clicks=0, style={
+            "backgroundColor": "#fd7e14",
+            "color": "white",
+            "border": "none",
+            "padding": "8px 12px",
+            "borderRadius": "5px"
+        }),
+        html.Div(id="chat_output", style={"marginTop": "15px", "maxWidth": "800px", "margin": "20px auto"}),
+    ], style={"maxWidth": "800px", "margin": "auto", "padding": "15px", "border": "1px solid #dee2e6", "borderRadius": "8px", "backgroundColor": "#f8f9fa"}),
+
+    dcc.Store(id="latest_plan_data"),
+    dcc.Store(id="chat_history"),
 ])
