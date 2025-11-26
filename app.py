@@ -680,10 +680,13 @@ def chat_with_agent(user_message, history, plan_data, email, form_fields):
 
     history_text = ""
     if history:
-        trimmed = history[-6:]  # keep recent context
+        # keep a generous window for continuity
+        trimmed = history[-14:]  # up to 7 exchanges
         pairs = []
         for h in trimmed:
-            pairs.append(f"{h.get('role')}: {h.get('content')}")
+            role = h.get("role", "user")
+            content = h.get("content", "")
+            pairs.append(f"{role}: {content}")
         history_text = "\n".join(pairs)
 
     profile_text = ""
@@ -704,11 +707,11 @@ def chat_with_agent(user_message, history, plan_data, email, form_fields):
     prompt = f"""
     {profile_text}
     {form_context}
-    Recent chat:
+    Ongoing conversation (chronological):
     {history_text}
 
     User question: {user_message}
-    Remember: cite sources with URLs. Use web_search tool for up-to-date or factual items.
+    Remember: keep continuity with earlier answers, reuse user-provided details, and cite sources with URLs. Use web_search tool for up-to-date or factual items.
     """
 
     response = agent.chat(prompt)
