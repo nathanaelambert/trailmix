@@ -1,7 +1,7 @@
 from recipes import Recipe
 from dash import html, dcc
 import dash_bootstrap_components as dbc
-
+import re
 
 
 def numeric_scale(qty, scale):
