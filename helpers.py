@@ -21,14 +21,23 @@ def numeric_scale(qty, scale):
     return qty_str
 
 def rescale_day(day_dict, target):
+    """
+    Rescale ingredients only - DO NOT rescale calories.
+    Calories are now fixed per meal per portion in code (see fix_calories_in_plan).
+    This function is kept for ingredient scaling if needed, but calories are preserved.
+    """
     meals = ["breakfast","lunch","dinner"]
+    # Calculate scale based on current calories, but DON'T apply it to calories
     total = sum(day_dict[m].get("calories", 0) for m in meals if m in day_dict)
     if total <= 0: return day_dict
     scale = target / total
+    # Only scale ingredients, NOT calories (calories are fixed in code)
     for m in meals:
         if m not in day_dict: continue
         meal = day_dict[m]
-        meal["calories"] = round(meal.get("calories", 0) * scale)
+        # DO NOT rescale calories - they are fixed per meal per portion
+        # meal["calories"] = round(meal.get("calories", 0) * scale)  # REMOVED
+        # Only scale ingredients if needed (though LLM should already scale them for portions)
         for k,v in meal.get("ingredients", {}).items():
             meal["ingredients"][k] = numeric_scale(v, scale)
     return day_dict

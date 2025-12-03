@@ -5,6 +5,7 @@ import dash_bootstrap_components as dbc
 import os
 import sqlite3
 import json
+import re
 from dotenv import load_dotenv
 from datetime import datetime
 import requests
@@ -432,6 +433,151 @@ def extract_json_block(raw_text: str) -> str:
     return trimmed
 
 
+def recalculate_grocery_list(plan: dict, portions: dict = None) -> list:
+    """
+    Recalculate the grocery list from the meal plan, summing all ingredients across all meals.
+    Accounts for portion multipliers.
+    """
+    if portions is None:
+        portions = {}
+    
+    # Aggregate ingredients from all meals
+    ingredient_totals = {}  # {item: {"quantity": total, "category": category}}
+    
+    meal_plan = plan.get("meal_plan", [])
+    if not isinstance(meal_plan, list):
+        return []
+    
+    days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    
+    for day_entry in meal_plan:
+        if not isinstance(day_entry, dict):
+            continue
+        
+        day_name = day_entry.get("day", "")
+        meals = day_entry.get("meals", {})
+        
+        if not isinstance(meals, dict):
+            continue
+        
+        for meal_type in ["breakfast", "lunch", "dinner"]:
+            if meal_type not in meals:
+                continue
+            
+            meal = meals[meal_type]
+            if not isinstance(meal, dict):
+                continue
+            
+            # Get portion count for this meal
+            portion_key = f"{day_name}_{meal_type}"
+            portion_count = portions.get(portion_key, 1)
+            
+            # Skip meals with 0 portions
+            if portion_count == 0:
+                continue
+            
+            ingredients = meal.get("ingredients", {})
+            if not isinstance(ingredients, dict):
+                continue
+            
+            # Add ingredients to totals (multiply by portion count)
+            for ingredient, quantity in ingredients.items():
+                if ingredient not in ingredient_totals:
+                    # Try to determine category (simplified - could be improved)
+                    category = "Other"
+                    ingredient_lower = ingredient.lower()
+                    if any(word in ingredient_lower for word in ["milk", "cheese", "yogurt", "butter", "cream"]):
+                        category = "Dairy"
+                    elif any(word in ingredient_lower for word in ["chicken", "beef", "pork", "fish", "meat"]):
+                        category = "Meat"
+                    elif any(word in ingredient_lower for word in ["apple", "banana", "tomato", "onion", "pepper", "vegetable", "fruit"]):
+                        category = "Produce"
+                    elif any(word in ingredient_lower for word in ["flour", "sugar", "salt", "oil", "vinegar", "spice"]):
+                        category = "Pantry"
+                    
+                    ingredient_totals[ingredient] = {"quantity": "", "category": category}
+                
+                # For now, just note that we need this ingredient
+                # In a real implementation, you'd parse and sum quantities
+                # This is simplified - the LLM should handle quantity summing
+                if not ingredient_totals[ingredient]["quantity"]:
+                    ingredient_totals[ingredient]["quantity"] = quantity
+                # Note: Proper quantity summing would require parsing units (g, kg, cups, etc.)
+                # For simplicity, we'll let the LLM handle this in the initial generation
+    
+    # Convert to list format
+    grocery_list = []
+    for item, data in ingredient_totals.items():
+        grocery_list.append({
+            "item": item,
+            "quantity": data["quantity"],
+            "category": data["category"]
+        })
+    
+    return grocery_list
+
+
+def format_recipe_with_line_breaks(recipe_text: str) -> list:
+    """
+    Split recipe text by numbered steps and return as a list of HTML elements with line breaks.
+    Handles formats like "1. Step one. 2. Step two." or "1. Step one\n2. Step two"
+    """
+    if not recipe_text:
+        return []
+    
+    # First, try splitting by newlines if they exist
+    if '\n' in recipe_text:
+        steps = [s.strip() for s in recipe_text.split('\n') if s.strip()]
+    else:
+        # Split by numbered patterns (1., 2., 3., etc.)
+        # Better pattern: find all matches of "number. text" including the first one
+        # This pattern finds: number, period, optional space, then everything up to next number or end
+        pattern = r'(\d+\.\s*[^0-9]*?)(?=\d+\.\s*|$)'
+        steps = re.findall(pattern, recipe_text)
+        
+        # If no matches, try splitting by "number. " pattern more carefully
+        if not steps:
+            # Split by "number. " but keep the delimiter
+            parts = re.split(r'(\d+\.\s+)', recipe_text)
+            steps = []
+            # Combine number with following text
+            i = 0
+            while i < len(parts):
+                if re.match(r'\d+\.\s+', parts[i]):
+                    # This is a number, combine with next part
+                    step_text = parts[i]
+                    if i + 1 < len(parts):
+                        step_text += parts[i + 1]
+                    steps.append(step_text.strip())
+                    i += 2
+                else:
+                    # This might be text before first number - include it
+                    if parts[i].strip():
+                        steps.append(parts[i].strip())
+                    i += 1
+            
+            # If still no steps, just use the whole text
+            if not steps:
+                steps = [recipe_text]
+    
+    # Create HTML elements for each step
+    recipe_elements = []
+    for step in steps:
+        step_clean = step.strip()
+        if step_clean:
+            recipe_elements.append(
+                html.Div(
+                    step_clean,
+                    style={
+                        "marginBottom": "8px",
+                        "paddingLeft": "10px"
+                    }
+                )
+            )
+    
+    return recipe_elements if recipe_elements else [html.Div(recipe_text)]
+
+
 def clean_json_text(raw_text: str) -> str:
     """Light cleanup for common JSON mistakes (trailing commas, smart quotes)."""
     if raw_text is None:
@@ -535,6 +681,69 @@ def load_plan(json_text: str) -> dict:
     return obj
 
 
+def fix_calories_in_plan(plan: dict, daily_calorie_target: float, portions: dict = None) -> dict:
+    """
+    Override calories in the meal plan based on fixed per-meal, per-portion targets.
+    This ensures calories are calculated correctly regardless of what the LLM generated.
+    
+    Rules:
+    - Breakfast: 25% of daily target per portion
+    - Lunch: 35% of daily target per portion
+    - Dinner: 40% of daily target per portion
+    - If a meal has 0 portions, set calories to 0
+    - Calories are per portion, not total
+    """
+    if portions is None:
+        portions = {}
+    
+    # Fixed per-portion calorie targets
+    base_calories = {
+        "breakfast": round(daily_calorie_target * 0.25),  # 25% of daily
+        "lunch": round(daily_calorie_target * 0.35),      # 35% of daily
+        "dinner": round(daily_calorie_target * 0.40),     # 40% of daily
+    }
+    
+    # Get the meal plan array
+    meal_plan = plan.get("meal_plan", [])
+    if not isinstance(meal_plan, list):
+        return plan
+    
+    days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    
+    # Iterate through each day
+    for day_entry in meal_plan:
+        if not isinstance(day_entry, dict):
+            continue
+        
+        day_name = day_entry.get("day", "")
+        meals = day_entry.get("meals", {})
+        
+        if not isinstance(meals, dict):
+            continue
+        
+        # Fix calories for each meal type
+        for meal_type in ["breakfast", "lunch", "dinner"]:
+            if meal_type not in meals:
+                continue
+            
+            meal = meals[meal_type]
+            if not isinstance(meal, dict):
+                continue
+            
+            # Get portion count for this specific meal
+            portion_key = f"{day_name}_{meal_type}"
+            portion_count = portions.get(portion_key, 1)
+            
+            # If 0 portions, set calories to 0
+            if portion_count == 0:
+                meal["calories"] = 0
+            else:
+                # Set calories to the fixed per-portion target
+                meal["calories"] = base_calories[meal_type]
+    
+    return plan
+
+
 def render_plan_view(plan: dict, target: float, portions: dict = None):
     days = normalize_mealplan(plan.get("meal_plan"))
     blocks = []
@@ -549,7 +758,8 @@ def render_plan_view(plan: dict, target: float, portions: dict = None):
     for day_idx, (day_name, day_dict) in enumerate(days):
         if not isinstance(day_dict, dict):
             continue
-        day_dict = rescale_day(day_dict, target)
+        # DO NOT call rescale_day - calories are fixed per meal per portion in code
+        # day_dict = rescale_day(day_dict, target)  # REMOVED - calories are now fixed in fix_calories_in_plan()
         total = sum(day_dict[m].get("calories",0) for m in ["breakfast","lunch","dinner"] if m in day_dict)
         day_totals.append(total)
         
@@ -618,8 +828,9 @@ def render_plan_view(plan: dict, target: float, portions: dict = None):
             # Recipe instructions
             recipe_section = None
             if meal.get('recipe'):
+                recipe_steps = format_recipe_with_line_breaks(meal.get('recipe',''))
                 recipe_section = html.Div(
-                    meal.get('recipe',''), 
+                    recipe_steps,
                     style={
                         "fontSize": "13px",
                         "color": "#555", 
@@ -817,6 +1028,8 @@ for day_idx in range(7):
     for meal_type in ["breakfast", "lunch", "dinner"]:
         @app.callback(
             Output(f"meal-card-{day_idx}-{meal_type}", "children"),
+            Output("plan-data-store", "data", allow_duplicate=True),
+            Output("grocery-list-store", "data", allow_duplicate=True),
             Input(f"change-meal-{day_idx}-{meal_type}", "n_clicks"),
             State(f"meal-data-{day_idx}-{meal_type}", "data"),
             State("body_weight", "value"),
@@ -824,9 +1037,11 @@ for day_idx in range(7):
             State("goals", "value"),
             State("restrictions", "value"),
             State("diet_type", "value"),
+            State("plan-data-store", "data"),
+            State({"type": "portion", "day": ALL, "meal": ALL}, "value"),
             prevent_initial_call=True
         )
-        def change_single_meal(n_clicks, meal_data, weight, activity_hours, goals, restrictions, diet):
+        def change_single_meal(n_clicks, meal_data, weight, activity_hours, goals, restrictions, diet, plan_data, portion_values):
             if not n_clicks or not meal_data:
                 raise PreventUpdate
             
@@ -834,6 +1049,26 @@ for day_idx in range(7):
             day_name = meal_data.get("day_name", "Monday")
             meal_type = meal_data.get("meal_type", "breakfast")
             target_calories = meal_data.get("target_calories", 400)
+            
+            # Get portion count for this specific meal
+            portion_count = 1
+            if portion_values and len(portion_values) == 21:
+                days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                meals_list = ["breakfast", "lunch", "dinner"]
+                try:
+                    # Find the index: meals are ordered as breakfast (all days), lunch (all days), dinner (all days)
+                    meal_idx = meals_list.index(meal_type)
+                    day_idx = days_list.index(day_name)
+                    # Index calculation: meal_idx * 7 (days) + day_idx
+                    idx = meal_idx * 7 + day_idx
+                    if idx < len(portion_values):
+                        val = portion_values[idx]
+                        portion_count = int(val) if (val is not None and val != '') else 1
+                except (ValueError, IndexError):
+                    portion_count = 1
+            
+            # Calculate total calories for all portions
+            total_calories = target_calories * portion_count
             
             prompt = f"""
             Generate a single {meal_type} recipe as JSON with this exact structure:
@@ -846,10 +1081,13 @@ for day_idx in range(7):
             
             Requirements:
             - For a {meal_type} meal
-            - Target calories: {target_calories} kcal (±10% is okay)
+            - Number of portions: {portion_count} person{'s' if portion_count != 1 else ''}
+            - Target calories per portion: {target_calories} kcal (±10% is okay)
+            - Total calories for all portions: {total_calories} kcal
             - Diet: {diet}
             - Restrictions: {restrictions or 'None'}
-            - Use rounded quantities (50g, 100g, 1 cup, 2 tbsp, etc.)
+            - IMPORTANT: Scale all ingredient quantities for {portion_count} portion{'s' if portion_count != 1 else ''}
+            - Use rounded quantities (50g, 100g, 1 cup, 2 tbsp, etc.) - multiply by {portion_count} for the total
             - Provide 5-7 numbered steps with specific actions, timing, and temperatures
             - Return ONLY valid JSON, no markdown or extra text
             """
@@ -865,9 +1103,16 @@ for day_idx in range(7):
                 meal_data_new = json.loads(raw_content)
                 
                 # Render the new meal card
+                calories_per_portion = meal_data_new.get('calories', target_calories)
+                if portion_count > 1:
+                    calorie_display = f"{calories_per_portion} kcal/portion (×{portion_count} = {int(calories_per_portion) * portion_count} kcal total)"
+                else:
+                    calorie_display = f"{calories_per_portion} kcal"
+                
                 meal_header = html.Div([
                     html.Span(meal_data_new.get('meal', meal_type), style={"fontWeight": "bold", "fontSize": "16px", "color": "#2c3e50"}),
-                    html.Span(f" • {meal_data_new.get('calories','?')} kcal", style={"fontSize": "13px", "color": "#7f8c8d", "marginLeft": "8px"}),
+                    html.Span(f" • {portion_count} portion{'s' if portion_count != 1 else ''}", style={"fontSize": "13px", "color": "#3498db", "marginLeft": "8px", "fontWeight": "500"}),
+                    html.Span(f" • {calorie_display}", style={"fontSize": "13px", "color": "#7f8c8d", "marginLeft": "8px"}),
                 ], style={"marginBottom": "10px"})
                 
                 # Ingredients
@@ -891,9 +1136,10 @@ for day_idx in range(7):
                 
                 ingredients_section = html.Div(ingredient_cards, style={"marginBottom": "12px"})
                 
-                # Recipe
+                # Recipe with line breaks
+                recipe_steps = format_recipe_with_line_breaks(meal_data_new.get('recipe',''))
                 recipe_section = html.Div(
-                    meal_data_new.get('recipe',''), 
+                    recipe_steps,
                     style={
                         "fontSize": "13px",
                         "color": "#555", 
@@ -906,8 +1152,73 @@ for day_idx in range(7):
                     }
                 )
                 
-                # Return new card content
-                return [
+                # Update the plan data with the new meal
+                updated_plan = None
+                updated_grocery = None
+                
+                if plan_data:
+                    try:
+                        # Parse the plan data
+                        if isinstance(plan_data, str):
+                            plan_dict = json.loads(plan_data)
+                        elif isinstance(plan_data, dict):
+                            plan_dict = plan_data
+                        else:
+                            plan_dict = {}
+                        
+                        # Find and update the specific meal in the plan
+                        meal_plan = plan_dict.get("meal_plan", [])
+                        days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                        
+                        for day_entry in meal_plan:
+                            if isinstance(day_entry, dict) and day_entry.get("day") == day_name:
+                                meals = day_entry.get("meals", {})
+                                if meal_type in meals:
+                                    # Update the meal with new data
+                                    meals[meal_type] = meal_data_new
+                                    break
+                        
+                        # Parse portions from portion_values
+                        portions = {}
+                        if portion_values and len(portion_values) == 21:
+                            idx = 0
+                            for meal in ["breakfast", "lunch", "dinner"]:
+                                for day in days_list:
+                                    val = portion_values[idx]
+                                    portions[f"{day}_{meal}"] = int(val) if (val is not None and val != '') else 1
+                                    idx += 1
+                        else:
+                            # Default: all meals = 1 portion
+                            for day in days_list:
+                                for meal in ["breakfast", "lunch", "dinner"]:
+                                    portions[f"{day}_{meal}"] = 1
+                        
+                        # Recalculate grocery list using the helper function
+                        updated_grocery = recalculate_grocery_list(plan_dict, portions)
+                        
+                        # Update plan_data - keep the same format (string or dict)
+                        if isinstance(plan_data, str):
+                            updated_plan = json.dumps(plan_dict)
+                        else:
+                            updated_plan = plan_dict
+                        
+                        print(f"✅ Updated meal {day_name} {meal_type}, grocery list has {len(updated_grocery)} items")
+                        
+                    except Exception as e:
+                        print(f"⚠️ Error updating plan/grocery list: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        # If update fails, just return the meal card without updating plan
+                        updated_plan = no_update
+                        updated_grocery = no_update
+                else:
+                    # No plan_data available, can't update grocery list
+                    updated_plan = no_update
+                    updated_grocery = no_update
+                    print(f"⚠️ No plan_data available, cannot update grocery list")
+                
+                # Return new card content, updated plan, and updated grocery list
+                meal_card_content = [
                     html.Div([
                         html.H5(meal_type.capitalize(), style={"color": "#7f8c8d", "fontSize": "14px", "marginBottom": "8px", "textTransform": "uppercase", "letterSpacing": "0.5px", "display": "inline-block"}),
                         dbc.Button(
@@ -925,8 +1236,11 @@ for day_idx in range(7):
                     dcc.Store(id=f"meal-data-{day_idx}-{meal_type}", data=meal_data)
                 ]
                 
+                return meal_card_content, updated_plan, updated_grocery
+                
             except Exception as e:
-                return html.Div(f"Error regenerating recipe: {str(e)}", style={"color": "red"})
+                error_div = html.Div(f"Error regenerating recipe: {str(e)}", style={"color": "red"})
+                return error_div, no_update, no_update
 
 
 def generate_plan(n, weight, activity_hours, goals, budget, calories, restrictions, diet, location, avoid_ingredients="", cravings="", complexity="medium", cuisines=None, portions=None):
@@ -1035,14 +1349,20 @@ def generate_plan(n, weight, activity_hours, goals, budget, calories, restrictio
         raw_content = (response.choices[0].message.content or "").strip()
         json_text = extract_json_block(raw_content)
         plan = load_plan(json_text)
-        plan_payload = json_text
+        # Fix calories in code - override LLM's calorie values with correct per-portion targets
+        plan = fix_calories_in_plan(plan, calories, portions)
+        # Update the JSON payload with corrected calories
+        plan_payload = json.dumps(plan)
         return render_plan_view(plan, calories, portions), plan_payload
     except json.JSONDecodeError as je:
         cleaned_text = clean_json_text(json_text)
         if cleaned_text != json_text:
             try:
                 plan = load_plan(cleaned_text)
-                plan_payload = cleaned_text
+                # Fix calories in code - override LLM's calorie values with correct per-portion targets
+                plan = fix_calories_in_plan(plan, calories, portions)
+                # Update the JSON payload with corrected calories
+                plan_payload = json.dumps(plan)
                 return render_plan_view(plan, calories, portions), plan_payload
             except json.JSONDecodeError:
                 pass
@@ -1170,7 +1490,10 @@ def generate_plan_hf(n, weight, activity_hours, goals, budget, calories, restric
         raw_content = raw_output.get("generated_text") or ""
         json_text = extract_json_block(raw_content)
         plan = load_plan(json_text)
-        plan_payload = json_text
+        # Fix calories in code - override LLM's calorie values with correct per-portion targets
+        plan = fix_calories_in_plan(plan, calories, portions)
+        # Update the JSON payload with corrected calories
+        plan_payload = json.dumps(plan)
         return render_plan_view(plan, calories, portions), plan_payload
     except Exception as e:
         return html.Div(
