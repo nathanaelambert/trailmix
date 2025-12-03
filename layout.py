@@ -73,6 +73,7 @@ layout = html.Div([
               updatemode='drag',
           ),
           id="calories_slider_container"
+
         ),
         dcc.Checklist(
             options=[{"label": "Compute for me", "value": "ignore"}],
