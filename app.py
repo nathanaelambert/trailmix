@@ -480,39 +480,65 @@ def recalculate_grocery_list(plan: dict, portions: dict = None) -> list:
             if not isinstance(ingredients, dict):
                 continue
             
-            # Add ingredients to totals (multiply by portion count)
+            # Add ingredients to totals
+            # Track all occurrences of each ingredient to properly aggregate
             for ingredient, quantity in ingredients.items():
-                if ingredient not in ingredient_totals:
+                ingredient_key = ingredient.lower().strip()  # Normalize for comparison
+                
+                if ingredient_key not in ingredient_totals:
                     # Try to determine category (simplified - could be improved)
                     category = "Other"
-                    ingredient_lower = ingredient.lower()
+                    ingredient_lower = ingredient_key
                     if any(word in ingredient_lower for word in ["milk", "cheese", "yogurt", "butter", "cream"]):
                         category = "Dairy"
-                    elif any(word in ingredient_lower for word in ["chicken", "beef", "pork", "fish", "meat"]):
+                    elif any(word in ingredient_lower for word in ["chicken", "beef", "pork", "fish", "meat", "turkey", "lamb"]):
                         category = "Meat"
-                    elif any(word in ingredient_lower for word in ["apple", "banana", "tomato", "onion", "pepper", "vegetable", "fruit"]):
+                    elif any(word in ingredient_lower for word in ["apple", "banana", "tomato", "onion", "pepper", "vegetable", "fruit", "lettuce", "carrot", "cucumber", "broccoli"]):
                         category = "Produce"
-                    elif any(word in ingredient_lower for word in ["flour", "sugar", "salt", "oil", "vinegar", "spice"]):
+                    elif any(word in ingredient_lower for word in ["flour", "sugar", "salt", "oil", "vinegar", "spice", "pepper", "garlic", "herb"]):
                         category = "Pantry"
                     
-                    ingredient_totals[ingredient] = {"quantity": "", "category": category}
+                    ingredient_totals[ingredient_key] = {
+                        "item": ingredient,  # Keep original name
+                        "quantities": [],  # List of all quantities
+                        "category": category
+                    }
                 
-                # For now, just note that we need this ingredient
-                # In a real implementation, you'd parse and sum quantities
-                # This is simplified - the LLM should handle quantity summing
-                if not ingredient_totals[ingredient]["quantity"]:
-                    ingredient_totals[ingredient]["quantity"] = quantity
-                # Note: Proper quantity summing would require parsing units (g, kg, cups, etc.)
-                # For simplicity, we'll let the LLM handle this in the initial generation
+                # Add this quantity to the list (we'll aggregate later)
+                # For portion scaling, we could multiply here, but for simplicity,
+                # we'll just collect all quantities and let the UI show them
+                ingredient_totals[ingredient_key]["quantities"].append({
+                    "quantity": quantity,
+                    "portions": portion_count
+                })
     
-    # Convert to list format
+    # Convert to list format, aggregating quantities
     grocery_list = []
-    for item, data in ingredient_totals.items():
+    for ingredient_key, data in ingredient_totals.items():
+        # Aggregate quantities - for now, just list all unique quantities
+        # In a full implementation, we'd parse and sum units
+        quantities = data.get("quantities", [])
+        if quantities:
+            # Get unique quantities or combine them
+            unique_quantities = set(q["quantity"] for q in quantities if q.get("quantity"))
+            if len(unique_quantities) == 1:
+                # All the same, just use it
+                quantity_str = list(unique_quantities)[0]
+            else:
+                # Multiple different quantities - combine them
+                # For simplicity, just list them (e.g., "200g, 300g" or use the first)
+                quantity_str = ", ".join(sorted(unique_quantities)) if len(unique_quantities) <= 3 else list(unique_quantities)[0]
+        else:
+            quantity_str = data.get("quantity", "")
+        
         grocery_list.append({
-            "item": item,
-            "quantity": data["quantity"],
+            "item": data.get("item", ingredient_key),  # Use original ingredient name
+            "quantity": quantity_str,
             "category": data["category"]
         })
+    
+    # Sort by category, then by item name
+    grocery_list.sort(key=lambda x: (x["category"], x["item"].lower()))
     
     return grocery_list
 
@@ -530,14 +556,31 @@ def format_recipe_with_line_breaks(recipe_text: str) -> list:
         steps = [s.strip() for s in recipe_text.split('\n') if s.strip()]
     else:
         # Split by numbered patterns (1., 2., 3., etc.)
-        # Better pattern: find all matches of "number. text" including the first one
-        # This pattern finds: number, period, optional space, then everything up to next number or end
-        pattern = r'(\d+\.\s*[^0-9]*?)(?=\d+\.\s*|$)'
-        steps = re.findall(pattern, recipe_text)
+        # Use a more robust pattern that captures everything between numbers
+        # Pattern: number followed by period and optional space, then capture everything until next number or end
+        # This handles cases like "1. Step one. 2. Step two" or "1.Step one 2.Step two"
         
-        # If no matches, try splitting by "number. " pattern more carefully
-        if not steps:
-            # Split by "number. " but keep the delimiter
+        # First, find all number positions
+        number_positions = []
+        for match in re.finditer(r'\d+\.\s*', recipe_text):
+            number_positions.append(match.start())
+        
+        if number_positions:
+            steps = []
+            # Extract text between each number
+            for i in range(len(number_positions)):
+                start = number_positions[i]
+                # Find the end: either next number position or end of string
+                if i + 1 < len(number_positions):
+                    end = number_positions[i + 1]
+                else:
+                    end = len(recipe_text)
+                
+                step_text = recipe_text[start:end].strip()
+                if step_text:
+                    steps.append(step_text)
+        else:
+            # No numbered steps found, try splitting by "number. " pattern
             parts = re.split(r'(\d+\.\s+)', recipe_text)
             steps = []
             # Combine number with following text
@@ -1038,10 +1081,11 @@ for day_idx in range(7):
             State("restrictions", "value"),
             State("diet_type", "value"),
             State("plan-data-store", "data"),
+            State("grocery-list-store", "data"),
             State({"type": "portion", "day": ALL, "meal": ALL}, "value"),
             prevent_initial_call=True
         )
-        def change_single_meal(n_clicks, meal_data, weight, activity_hours, goals, restrictions, diet, plan_data, portion_values):
+        def change_single_meal(n_clicks, meal_data, weight, activity_hours, goals, restrictions, diet, plan_data, current_grocery_list, portion_values):
             if not n_clicks or not meal_data:
                 raise PreventUpdate
             
@@ -1175,7 +1219,9 @@ for day_idx in range(7):
                                 meals = day_entry.get("meals", {})
                                 if meal_type in meals:
                                     # Update the meal with new data
+                                    old_meal = meals[meal_type]
                                     meals[meal_type] = meal_data_new
+                                    print(f"✅ Updated {day_name} {meal_type}: {old_meal.get('meal', 'old')} -> {meal_data_new.get('meal', 'new')}")
                                     break
                         
                         # Parse portions from portion_values
@@ -1196,26 +1242,42 @@ for day_idx in range(7):
                         # Recalculate grocery list using the helper function
                         updated_grocery = recalculate_grocery_list(plan_dict, portions)
                         
+                        # Ensure we have a valid grocery list (even if empty, it should be a list)
+                        if not isinstance(updated_grocery, list) or len(updated_grocery) == 0:
+                            # Fallback to existing grocery list if recalculation failed or returned empty
+                            if current_grocery_list and isinstance(current_grocery_list, list) and len(current_grocery_list) > 0:
+                                updated_grocery = current_grocery_list
+                                print(f"⚠️ Grocery recalculation returned empty, using existing list with {len(updated_grocery)} items")
+                            else:
+                                updated_grocery = []
+                                print(f"⚠️ No grocery list available, using empty list")
+                        else:
+                            print(f"✅ Updated meal {day_name} {meal_type}, grocery list has {len(updated_grocery)} items")
+                        
                         # Update plan_data - keep the same format (string or dict)
                         if isinstance(plan_data, str):
                             updated_plan = json.dumps(plan_dict)
                         else:
                             updated_plan = plan_dict
                         
-                        print(f"✅ Updated meal {day_name} {meal_type}, grocery list has {len(updated_grocery)} items")
-                        
                     except Exception as e:
                         print(f"⚠️ Error updating plan/grocery list: {e}")
                         import traceback
                         traceback.print_exc()
-                        # If update fails, just return the meal card without updating plan
+                        # If update fails, preserve existing grocery list instead of clearing it
                         updated_plan = no_update
-                        updated_grocery = no_update
+                        if current_grocery_list and isinstance(current_grocery_list, list):
+                            updated_grocery = current_grocery_list
+                        else:
+                            updated_grocery = []
                 else:
-                    # No plan_data available, can't update grocery list
+                    # No plan_data available, preserve existing grocery list
                     updated_plan = no_update
-                    updated_grocery = no_update
-                    print(f"⚠️ No plan_data available, cannot update grocery list")
+                    if current_grocery_list and isinstance(current_grocery_list, list):
+                        updated_grocery = current_grocery_list
+                    else:
+                        updated_grocery = []
+                    print(f"⚠️ No plan_data available, preserving existing grocery list")
                 
                 # Return new card content, updated plan, and updated grocery list
                 meal_card_content = [
