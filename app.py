@@ -37,7 +37,7 @@ app.layout = layout
 ACTIVITY_OPTIONS = ["Sedentary","Lightly active","Moderately active","Very active","Extra active"]
 DIET_OPTIONS = ["Omnivore","Vegetarian","Keto","Vegan","Pescatarian","Gluten free","Other"]
 GOALS_OPTIONS = [
-    "Lose weight","Build muscle","Maintain muscle mass",
+    "Lose weight","Build muscle","Maintain weight",
     "Reduce meat consumption","Discover new recipes","Reduce processed food consumption",
 ]
 
@@ -433,30 +433,26 @@ def extract_json_block(raw_text: str) -> str:
     return trimmed
 
 
-def recalculate_grocery_list(plan: dict, portions: dict = None) -> list:
+def aggregate_grocery_list_from_plan(plan: dict) -> list:
     """
-    Recalculate the grocery list from the meal plan, summing all ingredients across all meals.
-    Accounts for portion multipliers.
+    Simple function to aggregate all ingredients from all meals in the plan.
+    Just collects all unique ingredients - no complex quantity summing.
     """
-    if portions is None:
-        portions = {}
-    
-    # Aggregate ingredients from all meals
-    ingredient_totals = {}  # {item: {"quantity": total, "category": category}}
+    if not plan or not isinstance(plan, dict):
+        return []
     
     meal_plan = plan.get("meal_plan", [])
     if not isinstance(meal_plan, list):
         return []
     
-    days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    # Collect all ingredients from all meals
+    ingredient_map = {}  # {ingredient_name: {"quantity": quantity, "category": category}}
     
     for day_entry in meal_plan:
         if not isinstance(day_entry, dict):
             continue
         
-        day_name = day_entry.get("day", "")
         meals = day_entry.get("meals", {})
-        
         if not isinstance(meals, dict):
             continue
         
@@ -468,72 +464,47 @@ def recalculate_grocery_list(plan: dict, portions: dict = None) -> list:
             if not isinstance(meal, dict):
                 continue
             
-            # Get portion count for this meal
-            portion_key = f"{day_name}_{meal_type}"
-            portion_count = portions.get(portion_key, 1)
-            
-            # Skip meals with 0 portions
-            if portion_count == 0:
+            # Skip skipped meals
+            if meal.get('meal', '').lower() == 'skipped':
                 continue
             
             ingredients = meal.get("ingredients", {})
             if not isinstance(ingredients, dict):
                 continue
             
-            # Add ingredients to totals
-            # Track all occurrences of each ingredient to properly aggregate
+            # Add all ingredients to the map
             for ingredient, quantity in ingredients.items():
-                ingredient_key = ingredient.lower().strip()  # Normalize for comparison
+                if not ingredient or not quantity:
+                    continue
                 
-                if ingredient_key not in ingredient_totals:
-                    # Try to determine category (simplified - could be improved)
+                # Use ingredient name as key (case-insensitive for deduplication)
+                ingredient_key = ingredient.lower().strip()
+                
+                if ingredient_key not in ingredient_map:
+                    # Determine category
                     category = "Other"
-                    ingredient_lower = ingredient_key
-                    if any(word in ingredient_lower for word in ["milk", "cheese", "yogurt", "butter", "cream"]):
+                    if any(word in ingredient_key for word in ["milk", "cheese", "yogurt", "butter", "cream"]):
                         category = "Dairy"
-                    elif any(word in ingredient_lower for word in ["chicken", "beef", "pork", "fish", "meat", "turkey", "lamb"]):
+                    elif any(word in ingredient_key for word in ["chicken", "beef", "pork", "fish", "meat", "turkey", "lamb"]):
                         category = "Meat"
-                    elif any(word in ingredient_lower for word in ["apple", "banana", "tomato", "onion", "pepper", "vegetable", "fruit", "lettuce", "carrot", "cucumber", "broccoli"]):
+                    elif any(word in ingredient_key for word in ["apple", "banana", "tomato", "onion", "pepper", "vegetable", "fruit", "lettuce", "carrot", "cucumber", "broccoli"]):
                         category = "Produce"
-                    elif any(word in ingredient_lower for word in ["flour", "sugar", "salt", "oil", "vinegar", "spice", "pepper", "garlic", "herb"]):
+                    elif any(word in ingredient_key for word in ["flour", "sugar", "salt", "oil", "vinegar", "spice", "garlic", "herb"]):
                         category = "Pantry"
                     
-                    ingredient_totals[ingredient_key] = {
-                        "item": ingredient,  # Keep original name
-                        "quantities": [],  # List of all quantities
+                    # Store with original ingredient name
+                    ingredient_map[ingredient_key] = {
+                        "item": ingredient,
+                        "quantity": quantity,
                         "category": category
                     }
-                
-                # Add this quantity to the list (we'll aggregate later)
-                # For portion scaling, we could multiply here, but for simplicity,
-                # we'll just collect all quantities and let the UI show them
-                ingredient_totals[ingredient_key]["quantities"].append({
-                    "quantity": quantity,
-                    "portions": portion_count
-                })
     
-    # Convert to list format, aggregating quantities
+    # Convert to list and sort
     grocery_list = []
-    for ingredient_key, data in ingredient_totals.items():
-        # Aggregate quantities - for now, just list all unique quantities
-        # In a full implementation, we'd parse and sum units
-        quantities = data.get("quantities", [])
-        if quantities:
-            # Get unique quantities or combine them
-            unique_quantities = set(q["quantity"] for q in quantities if q.get("quantity"))
-            if len(unique_quantities) == 1:
-                # All the same, just use it
-                quantity_str = list(unique_quantities)[0]
-            else:
-                # Multiple different quantities - combine them
-                # For simplicity, just list them (e.g., "200g, 300g" or use the first)
-                quantity_str = ", ".join(sorted(unique_quantities)) if len(unique_quantities) <= 3 else list(unique_quantities)[0]
-        else:
-            quantity_str = data.get("quantity", "")
-        
+    for data in ingredient_map.values():
         grocery_list.append({
-            "item": data.get("item", ingredient_key),  # Use original ingredient name
-            "quantity": quantity_str,
+            "item": data["item"],
+            "quantity": data["quantity"],
             "category": data["category"]
         })
     
@@ -689,6 +660,25 @@ Recipe instructions format (for the recipe field):
 - Use action verbs: chop, dice, heat, stir, mix, cook, bake, season, serve
 - Format: "1. [action]. 2. [action]. 3. [action]..." all in one paragraph separated by spaces
 """
+
+# Callback to handle tab switching
+@app.callback(
+    Output("user-info-content", "style"),
+    Output("recipes-content", "style"),
+    Output("grocery-list-content", "style"),
+    Input("main-tabs", "active_tab")
+)
+def switch_tab(active_tab):
+    """Show/hide tab content based on active tab."""
+    if active_tab == "user-info":
+        return {"display": "block"}, {"display": "none"}, {"display": "none"}
+    elif active_tab == "recipes":
+        return {"display": "none"}, {"display": "block"}, {"display": "none"}
+    elif active_tab == "grocery-list":
+        return {"display": "none"}, {"display": "none"}, {"display": "block"}
+    else:
+        return {"display": "block"}, {"display": "none"}, {"display": "none"}
+
 
 @app.callback(
     Output("budget_slider_container", "style"),
@@ -890,18 +880,32 @@ def render_plan_view(plan: dict, target: float, portions: dict = None):
             meal_card_id = f"meal-card-{day_idx}-{m}"
             change_button_id = f"change-meal-{day_idx}-{m}"
             
+            # Like button ID (premium feature) - using pattern matching
+            like_button_id = {"type": "like-recipe", "day": day_idx, "meal": m}
+            
             # Create a card for this meal
             meal_card = html.Div([
                 html.Div([
                     html.H5(m.capitalize(), style={"color": "#7f8c8d", "fontSize": "14px", "marginBottom": "8px", "textTransform": "uppercase", "letterSpacing": "0.5px", "display": "inline-block"}),
-                    dbc.Button(
-                        "🔀 Change",
-                        id=change_button_id,
-                        color="light",
-                        size="sm",
-                        n_clicks=0,
-                        style={"float": "right", "fontSize": "12px", "padding": "4px 10px"}
-                    ),
+                    html.Div([
+                        dbc.Button(
+                            "❤️ Save",
+                            id=like_button_id,
+                            color="danger",
+                            size="sm",
+                            n_clicks=0,
+                            outline=True,
+                            style={"fontSize": "12px", "padding": "4px 10px", "marginRight": "5px"}
+                        ),
+                        dbc.Button(
+                            "🔀 Change",
+                            id=change_button_id,
+                            color="light",
+                            size="sm",
+                            n_clicks=0,
+                            style={"fontSize": "12px", "padding": "4px 10px"}
+                        ),
+                    ], style={"float": "right"}),
                 ], style={"marginBottom": "8px"}),
                 meal_header,
                 ingredients_section,
@@ -960,63 +964,13 @@ def render_plan_view(plan: dict, target: float, portions: dict = None):
             ], style={"marginBottom": "10px", "borderRadius": "8px", "border": "1px solid #ddd"})
         )
 
-    # Grocery List Section - Editable
+    # Grocery list is now in a separate tab - just initialize the store
     grocery = plan.get("grocery_list") or []
-    print(f"🛒 DEBUG: grocery_list from plan: {grocery}")
-    print(f"🛒 DEBUG: type: {type(grocery)}")
     if isinstance(grocery, dict):
         grocery = list(grocery.values())
     
-    if grocery:
-        blocks.append(html.H3("🛒 Grocery List", style={"marginTop": "30px", "marginBottom": "15px"}))
-        
-        # Store grocery list data for editing
-        blocks.append(dcc.Store(id="grocery-list-store", data=grocery))
-        
-        # Editable grocery list
-        blocks.append(html.Div(id="grocery-list-items"))
-        
-        # Add item section
-        blocks.append(
-            dbc.Card([
-                dbc.CardBody([
-                    html.H5("Add Custom Item", style={"marginBottom": "15px"}),
-                    dbc.Row([
-                        dbc.Col([
-                            dbc.Label("Item Name"),
-                            dbc.Input(id="new-grocery-item", placeholder="e.g., Chocolate bars", type="text")
-                        ], width=4),
-                        dbc.Col([
-                            dbc.Label("Quantity"),
-                            dbc.Input(id="new-grocery-quantity", placeholder="e.g., 3 bars", type="text")
-                        ], width=3),
-                        dbc.Col([
-                            dbc.Label("Category"),
-                            dbc.Select(
-                                id="new-grocery-category",
-                                options=[
-                                    {"label": "Produce", "value": "Produce"},
-                                    {"label": "Dairy", "value": "Dairy"},
-                                    {"label": "Meat", "value": "Meat"},
-                                    {"label": "Pantry", "value": "Pantry"},
-                                    {"label": "Bakery", "value": "Bakery"},
-                                    {"label": "Frozen", "value": "Frozen"},
-                                    {"label": "Beverages", "value": "Beverages"},
-                                    {"label": "Snacks", "value": "Snacks"},
-                                    {"label": "Spices", "value": "Spices"},
-                                    {"label": "Other", "value": "Other"},
-                                ],
-                                value="Snacks"
-                            )
-                        ], width=3),
-                        dbc.Col([
-                            dbc.Label(" ", style={"display": "block"}),
-                            dbc.Button("Add Item", id="add-grocery-item", color="success", style={"width": "100%"})
-                        ], width=2),
-                    ])
-                ])
-            ], style={"marginTop": "15px", "marginBottom": "20px", "backgroundColor": "#f8f9fa"})
-        )
+    # Store grocery list data for editing (will be updated by callback)
+    blocks.append(dcc.Store(id="grocery-list-store", data=grocery if grocery else []))
 
     # Summary Section
     summary = plan.get("summary") or {}
@@ -1239,8 +1193,8 @@ for day_idx in range(7):
                                 for meal in ["breakfast", "lunch", "dinner"]:
                                     portions[f"{day}_{meal}"] = 1
                         
-                        # Recalculate grocery list using the helper function
-                        updated_grocery = recalculate_grocery_list(plan_dict, portions)
+                        # Aggregate grocery list from all meals in the updated plan
+                        updated_grocery = aggregate_grocery_list_from_plan(plan_dict)
                         
                         # Ensure we have a valid grocery list (even if empty, it should be a list)
                         if not isinstance(updated_grocery, list) or len(updated_grocery) == 0:
@@ -1280,17 +1234,35 @@ for day_idx in range(7):
                     print(f"⚠️ No plan_data available, preserving existing grocery list")
                 
                 # Return new card content, updated plan, and updated grocery list
+                # Recreate meal_data dict for the Store
+                meal_data = {
+                    "day_name": day_name,
+                    "meal_type": meal_type,
+                    "target_calories": calories_per_portion
+                }
+                
                 meal_card_content = [
                     html.Div([
                         html.H5(meal_type.capitalize(), style={"color": "#7f8c8d", "fontSize": "14px", "marginBottom": "8px", "textTransform": "uppercase", "letterSpacing": "0.5px", "display": "inline-block"}),
-                        dbc.Button(
-                            "🔀 Change",
-                            id=f"change-meal-{day_idx}-{meal_type}",
-                            color="light",
-                            size="sm",
-                            n_clicks=0,
-                            style={"float": "right", "fontSize": "12px", "padding": "4px 10px"}
-                        ),
+                        html.Div([
+                            dbc.Button(
+                                "❤️ Save",
+                                id={"type": "like-recipe", "day": day_idx, "meal": meal_type},
+                                color="danger",
+                                size="sm",
+                                n_clicks=0,
+                                outline=True,
+                                style={"fontSize": "12px", "padding": "4px 10px", "marginRight": "5px"}
+                            ),
+                            dbc.Button(
+                                "🔀 Change",
+                                id=f"change-meal-{day_idx}-{meal_type}",
+                                color="light",
+                                size="sm",
+                                n_clicks=0,
+                                style={"fontSize": "12px", "padding": "4px 10px"}
+                            ),
+                        ], style={"float": "right"}),
                     ], style={"marginBottom": "8px"}),
                     meal_header,
                     ingredients_section,
@@ -2195,6 +2167,7 @@ def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity_hours, goals, b
 @app.callback(
     Output("profile_dashboard", "children"),
     Output("profile_message", "children"),
+    Output("main-tabs", "active_tab"),
     Input("latest_plan_data", "data"),
     Input("save_profile", "n_clicks"),
     Input("load_profile", "n_clicks"),
@@ -2222,13 +2195,13 @@ def persist_profile(plan_data, save_clicks, load_clicks, email, name, weight, ac
     trigger = ctx.triggered[0]["prop_id"].split(".")[0]
 
     if not email:
-        return no_update, html.Span("Add an email to save or load your profile.", style={"color": "#dc3545"})
+        return no_update, html.Span("Add an email to save or load your profile.", style={"color": "#dc3545"}), no_update
 
     if trigger == "load_profile":
         profile = get_user_profile(email)
         if not profile:
-            return render_profile_dashboard(None), html.Span("No saved profile found for that email yet.", style={"color": "#dc3545"})
-        return render_profile_dashboard(profile), html.Span("Loaded saved profile.", style={"color": "#198754"})
+            return render_profile_dashboard(None), html.Span("No saved profile found for that email yet.", style={"color": "#dc3545"}), no_update
+        return render_profile_dashboard(profile), html.Span("Loaded saved profile.", style={"color": "#198754"}), no_update
 
     last_plan = None
     if isinstance(plan_data, dict):
@@ -2269,7 +2242,12 @@ def persist_profile(plan_data, save_clicks, load_clicks, email, name, weight, ac
     )
     profile = get_user_profile(email)
     msg = "Profile auto-saved with your latest plan." if trigger == "latest_plan_data" else "Profile saved."
-    return render_profile_dashboard(profile), html.Span(msg, style={"color": "#198754"})
+    
+    # Switch to Recipes tab if save_profile button was clicked
+    if trigger == "save_profile":
+        return render_profile_dashboard(profile), html.Span(msg, style={"color": "#198754"}), "recipes"
+    else:
+        return render_profile_dashboard(profile), html.Span(msg, style={"color": "#198754"}), no_update
 
 
 @app.callback(
@@ -2377,27 +2355,194 @@ def handle_chat(n_clicks, user_message, history, plan_data, email, weight, budge
     return render_chat(updated_history), updated_history
 
 
+# -------------------- PROFILE SUMMARY FOR RECIPES TAB --------------------
+
 @app.callback(
-    Output("test_recipes_output", "children"),
-    Input("test_recipes", "n_clicks")
+    [Output("profile-summary-recipes", "children"),
+     Output("profile-info-message-recipes", "children")],
+    Input("user_email", "value"),
+    Input("user_name", "value"),
+    Input("body_weight", "value"),
+    Input("budget", "value"),
+    Input("budget_ignore", "value"),
+    Input("dayly_calories", "value"),
+    Input("calories_ignore", "value"),
+    Input("activity_hours", "value"),
+    Input("diet_type", "value"),
+    Input("location", "value"),
+    Input("goals", "value"),
+    Input("restrictions", "value"),
+    Input("avoid_ingredients", "value"),
+    Input("cravings", "value"),
+    Input("complexity", "value"),
+    Input("cuisines", "value"),
+    State({"type": "portion", "day": ALL, "meal": ALL}, "value"),
 )
-def display_test_recipes(n_clicks):
-    if n_clicks == 0:
-        return ""
+def render_profile_summary_recipes(email, name, weight, budget, budget_ignore, calories, calories_ignore, 
+                                   activity, diet, location, goals, restrictions, avoid_ingredients, 
+                                   cravings, complexity, cuisines, portion_values):
+    """Render a summary of the current profile settings for the Recipes tab and info message."""
+    items = []
+    
+    if name:
+        items.append(("Name", name))
+    if email:
+        items.append(("Email", email))
+    if weight:
+        items.append(("Weight", f"{weight} kg"))
+    if budget and "ignore" not in (budget_ignore or []):
+        items.append(("Weekly Budget", f"{budget} CHF"))
+    if calories and "ignore" not in (calories_ignore or []):
+        items.append(("Daily Calories", f"{calories} kcal"))
+    if activity:
+        items.append(("Physical Activity", f"{activity} hrs/week"))
+    if diet:
+        items.append(("Diet Type", diet))
+    if location:
+        items.append(("Location", location))
+    if goals:
+        items.append(("Goals", ", ".join(goals)))
+    if restrictions:
+        items.append(("Restrictions", restrictions))
+    if avoid_ingredients:
+        items.append(("Avoid Ingredients", avoid_ingredients))
+    if cravings:
+        items.append(("Cravings", cravings))
+    if complexity:
+        complexity_labels = {
+            "quick": "Quick (<20 min)",
+            "medium": "Medium (20-40 min)",
+            "elaborate": "Elaborate (>40 min)",
+            "mixed": "Mixed (variety)"
+        }
+        items.append(("Complexity", complexity_labels.get(complexity, complexity)))
+    if cuisines:
+        items.append(("Preferred Cuisines", ", ".join(cuisines)))
+    
+    # Check if custom portions are set
+    if portion_values:
+        has_custom_portions = any(v and int(v) != 1 for v in portion_values if v is not None and v != '')
+        if has_custom_portions:
+            items.append(("Portions", "Custom per-meal settings"))
+    
+    # Check if profile is complete enough (at least email is required)
+    is_profile_complete = bool(email and email.strip())
+    
+    # Info message
+    if not is_profile_complete:
+        info_message = dbc.Alert(
+            [
+                html.Strong("⚠️ Profile Required: "),
+                "Please fill out your profile information in the ",
+                html.Strong("User Info"),
+                " tab (at minimum, enter your email) or connect to a saved profile before generating recipes."
+            ],
+            color="warning",
+            style={"marginBottom": "20px"}
+        )
+    else:
+        info_message = html.Div()  # Empty div when profile is complete
+    
+    if not items:
+        summary = html.Div([
+            html.H4("📋 Profile Summary", style={"marginBottom": "15px"}),
+            html.P("Fill in your profile information in the 'User Info' tab to see your summary here.", 
+                   style={"color": "#6c757d", "fontStyle": "italic", "padding": "20px", "textAlign": "center"})
+        ])
+        return summary, info_message
+    
+    rows = []
+    for label, value in items:
+        rows.append(
+            html.Div([
+                html.Div(label, style={"fontWeight": "bold", "width": "30%", "color": "#495057"}),
+                html.Div(str(value), style={"width": "70%", "color": "#212529"}),
+            ], style={"display": "flex", "marginBottom": "8px", "padding": "8px", "backgroundColor": "#f8f9fa", "borderRadius": "4px"})
+        )
+    
+    summary = html.Div([
+        html.H4("📋 Profile Summary", style={"marginBottom": "15px", "color": "#2c3e50"}),
+        html.Div(rows, style={
+            "padding": "15px", 
+            "border": "1px solid #dee2e6", 
+            "borderRadius": "8px", 
+            "backgroundColor": "#fff",
+            "marginBottom": "20px"
+        })
+    ])
+    
+    return summary, info_message
 
-    blocks = []
-    # We have 14 recipes, ordered as Monday breakfast, Monday dinner, Tuesday breakfast, etc.
-    for i in range(14):
-        day_idx = i // 2
-        meal_idx = i % 2
-        day = days[day_idx]
-        meal = meal_times[meal_idx]
-        # Add header for each recipe pair (day and meal)
-        blocks.append(html.H4(f"{day} {meal}", style={"marginTop": "20px", "marginBottom": "10px"}))
-        # Add recipe widget
-        blocks.append(create_recipe_widget(sample_recipes[i]))
 
-    return blocks
+# -------------------- PREMIUM MODAL CALLBACKS --------------------
+
+# Simple callback for premium modal - handles all premium buttons
+@app.callback(
+    Output("premium-modal", "is_open"),
+    Input("open-premium-modal", "n_clicks"),
+    Input("close-premium-modal", "n_clicks"),
+    prevent_initial_call=True
+)
+def toggle_premium_modal(open_clicks, close_clicks):
+    """Open/close the premium modal."""
+    ctx = callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+    
+    trigger_id = ctx.triggered[0]["prop_id"]
+    
+    # Close modal if close button is clicked
+    if "close-premium-modal" in trigger_id:
+        return False
+    
+    # Open modal for "Go Premium" button
+    if "open-premium-modal" in trigger_id:
+        if open_clicks and open_clicks > 0:
+            return True
+    
+    raise PreventUpdate
+
+
+# Callback for Order Groceries button (only exists after grocery list is generated)
+@app.callback(
+    Output("premium-modal", "is_open", allow_duplicate=True),
+    Input("order-groceries-button", "n_clicks"),
+    prevent_initial_call=True
+)
+def open_premium_modal_from_order(n_clicks):
+    """Open premium modal when Order Groceries button is clicked."""
+    if n_clicks and n_clicks > 0:
+        return True
+    raise PreventUpdate
+
+
+# Callback for Save Recipe buttons (only exists after recipes are generated)
+@app.callback(
+    Output("premium-modal", "is_open", allow_duplicate=True),
+    Input({"type": "like-recipe", "day": ALL, "meal": ALL}, "n_clicks"),
+    prevent_initial_call=True
+)
+def open_premium_modal_from_like(like_clicks):
+    """Open premium modal when Save Recipe button is clicked."""
+    if not like_clicks:
+        raise PreventUpdate
+    
+    # Check if any like button was actually clicked (n_clicks > 0)
+    if any(clicks and clicks > 0 for clicks in like_clicks if clicks is not None):
+        return True
+    
+    raise PreventUpdate
+
+
+# Test recipes callback removed - button no longer in UI
+# @app.callback(
+#     Output("test_recipes_output", "children"),
+#     Input("test_recipes", "n_clicks")
+# )
+# def display_test_recipes(n_clicks):
+#     if n_clicks == 0:
+#         return ""
+#     ...
 
 
 # Callback for collapsible steps toggling (expand/collapse) for all recipes
@@ -2440,13 +2585,17 @@ for recipe in sample_recipes:
 # -------------------- GROCERY LIST EDITING CALLBACKS --------------------
 
 @app.callback(
-    Output("grocery-list-items", "children"),
+    Output("grocery-list-container", "children"),
     Input("grocery-list-store", "data"),
 )
 def render_grocery_list(grocery_data):
-    """Render the editable grocery list with remove buttons."""
+    """Render the editable grocery list with remove buttons in the grocery list tab."""
     if not grocery_data:
-        return html.P("No items in grocery list", style={"color": "#999", "fontStyle": "italic"})
+        return html.Div([
+            html.H3("🛒 Grocery List", style={"marginBottom": "20px"}),
+            html.P("No items in grocery list. Generate a meal plan to see your grocery list here.", 
+                   style={"color": "#999", "fontStyle": "italic", "padding": "20px", "textAlign": "center"})
+        ])
     
     # Group by category
     categorized = {}
@@ -2498,7 +2647,67 @@ def render_grocery_list(grocery_data):
             ])
         )
     
-    return html.Div(category_sections)
+    # Add Custom Item section
+    add_item_section = dbc.Card([
+        dbc.CardBody([
+            html.H5("Add Custom Item", style={"marginBottom": "15px"}),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Label("Item Name"),
+                    dbc.Input(id="new-grocery-item", placeholder="e.g., Chocolate bars", type="text")
+                ], width=4),
+                dbc.Col([
+                    dbc.Label("Quantity"),
+                    dbc.Input(id="new-grocery-quantity", placeholder="e.g., 3 bars", type="text")
+                ], width=3),
+                dbc.Col([
+                    dbc.Label("Category"),
+                    dbc.Select(
+                        id="new-grocery-category",
+                        options=[
+                            {"label": "Produce", "value": "Produce"},
+                            {"label": "Dairy", "value": "Dairy"},
+                            {"label": "Meat", "value": "Meat"},
+                            {"label": "Pantry", "value": "Pantry"},
+                            {"label": "Bakery", "value": "Bakery"},
+                            {"label": "Frozen", "value": "Frozen"},
+                            {"label": "Beverages", "value": "Beverages"},
+                            {"label": "Snacks", "value": "Snacks"},
+                            {"label": "Spices", "value": "Spices"},
+                            {"label": "Other", "value": "Other"},
+                        ],
+                        value="Snacks"
+                    )
+                ], width=3),
+                dbc.Col([
+                    dbc.Label(" ", style={"display": "block"}),
+                    dbc.Button("Add Item", id="add-grocery-item", color="success", style={"width": "100%"})
+                ], width=2),
+            ])
+        ])
+    ], style={"marginTop": "30px", "marginBottom": "20px", "backgroundColor": "#f8f9fa"})
+    
+    # Order button (premium feature)
+    order_button = dbc.Button(
+        "🛒 Order Groceries",
+        id="order-groceries-button",
+        color="success",
+        size="lg",
+        style={
+            "width": "100%",
+            "marginTop": "30px",
+            "padding": "15px",
+            "fontSize": "18px",
+            "fontWeight": "bold"
+        }
+    )
+    
+    return html.Div([
+        html.H3("🛒 Grocery List", style={"marginBottom": "20px"}),
+        html.Div(category_sections),
+        add_item_section,
+        order_button
+    ])
 
 
 @app.callback(

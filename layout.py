@@ -3,6 +3,23 @@ import dash_bootstrap_components as dbc
 from helpers import create_recipe_widget
 
 layout = html.Div([
+    # Premium button in top right
+    html.Div([
+        dbc.Button(
+            "⭐ Go Premium",
+            id="open-premium-modal",
+            color="warning",
+            n_clicks=0,
+            style={
+                "position": "absolute",
+                "top": "20px",
+                "right": "20px",
+                "zIndex": "1000",
+                "fontWeight": "bold"
+            }
+        )
+    ], style={"position": "relative"}),
+    
     html.H1([
         "🥗 CULIN",
         html.B("AI"),
@@ -11,30 +28,39 @@ layout = html.Div([
 
     html.P("Your AI meal planner – plan smart, eat better", style={"textAlign": "center", "color": "gray", "marginBottom": "20px"}),
 
-    html.Div([
-        html.H3("Your profile"),
-        html.P("Save your info once to reuse it next time you visit.", style={"color": "#6c757d"}),
-        html.Label("Email"),
-        dcc.Input(id="user_email", type="email", placeholder="you@example.com", style={"width": "100%", "marginBottom": "10px"}),
-        html.Label("Name"),
-        dcc.Input(id="user_name", type="text", placeholder="Sam C.", style={"width": "100%", "marginBottom": "10px"}),
+    # Tabs for better organization
+    dbc.Tabs([
+        dbc.Tab(label="👤 User Info", tab_id="user-info"),
+        dbc.Tab(label="🍲 Recipes", tab_id="recipes"),
+        dbc.Tab(label="🛒 Grocery List", tab_id="grocery-list"),
+    ], id="main-tabs", active_tab="user-info", style={"marginBottom": "20px"}),
+    
+    html.Div(id="tab-content"),
+    
+    # User Info Tab Content (initially visible)
+    html.Div(id="user-info-content", children=[
         html.Div([
-            html.Button("Save profile", id="save_profile", n_clicks=0, style={
-                "backgroundColor": "#17a2b8", "color": "white", "border": "none", "padding": "8px 12px", "borderRadius": "5px"
-            }),
-            html.Button("Load saved info", id="load_profile", n_clicks=0, style={
-                "backgroundColor": "#6c757d", "color": "white", "border": "none", "padding": "8px 12px",
-                "borderRadius": "5px", "marginLeft": "10px"
-            })
-        ], style={"marginBottom": "10px"}),
-        html.Div(id="profile_message", style={"marginTop": "5px", "color": "#0d6efd"}),
-        html.Div(id="profile_dashboard", style={"marginTop": "10px"}),
-    ], style={"maxWidth": "600px", "margin": "auto", "marginBottom": "30px", "padding": "15px", "border": "1px solid #dee2e6", "borderRadius": "8px", "backgroundColor": "#f8f9fa"}),
+            html.H3("Your profile"),
+            html.P("Save your info once to reuse it next time you visit.", style={"color": "#6c757d"}),
+            html.Label("Email"),
+            dcc.Input(id="user_email", type="email", placeholder="you@example.com", style={"width": "100%", "marginBottom": "10px"}),
+            html.Label("Name"),
+            dcc.Input(id="user_name", type="text", placeholder="Sam C.", style={"width": "100%", "marginBottom": "10px"}),
+            html.Div([
+                html.P("If you already have a profile: ", style={"display": "inline", "color": "#6c757d", "marginRight": "5px"}),
+                html.Button("Load saved info", id="load_profile", n_clicks=0, style={
+                    "backgroundColor": "#6c757d", "color": "white", "border": "none", "padding": "8px 12px",
+                    "borderRadius": "5px"
+                })
+            ], style={"marginBottom": "10px"}),
+            html.Div(id="profile_message", style={"marginTop": "5px", "color": "#0d6efd"}),
+            html.Div(id="profile_dashboard", style={"marginTop": "10px"}),
+        ], style={"maxWidth": "600px", "margin": "auto", "marginBottom": "30px", "padding": "15px", "border": "1px solid #dee2e6", "borderRadius": "8px", "backgroundColor": "#f8f9fa"}),
 
     html.Div([
-        html.Label("Weight (kg)", style={"marginBottom": "5px", "display": "block"}),
+            html.Label("Weight (kg)", style={"marginBottom": "5px", "display": "block"}),
         dcc.Input(
-            id="body_weight",
+          id="body_weight",
             type="number",
             min=0,
             max=300,
@@ -82,7 +108,7 @@ layout = html.Div([
             style={"marginBottom": "15px"}
         ),
         
-        html.Label("Activity (hours/week)", style={"marginBottom": "5px", "display": "block"}),
+        html.Label("Physical activity (hours/week)", style={"marginBottom": "5px", "display": "block"}),
         dcc.Input(
             id="activity_hours",
             type="number",
@@ -104,7 +130,7 @@ layout = html.Div([
         dcc.Checklist(
             id="goals",
             options=[{"label": g, "value": g} for g in
-                     ["Lose weight","Build muscle","Maintain muscle mass",
+                     ["Lose weight","Build muscle","Maintain weight",
                       "Reduce meat consumption","Discover new recipes","Reduce processed food consumption"]],
             value=["Lose weight"],
             inputStyle={"marginRight": "8px"},
@@ -213,41 +239,45 @@ layout = html.Div([
             ], style={"marginBottom": "5px"}),
         ], style={"marginBottom": "15px", "padding": "15px", "backgroundColor": "#f8f9fa", "borderRadius": "8px", "overflowX": "auto"}),
 
+        html.Button("Save profile", id="save_profile", n_clicks=0, style={
+            "backgroundColor": "#17a2b8", "color": "white", "border": "none", "padding": "8px 12px", "borderRadius": "5px", "marginBottom": "20px", "width": "100%"
+        }),
+        ], style={"maxWidth": "600px", "margin": "auto"}),
+    ]),
+    
+    # Recipes Tab Content
+    html.Div(id="recipes-content", style={"display": "none"}, children=[
+        html.Div(id="profile-summary-recipes", style={"maxWidth": "95%", "margin": "20px auto", "padding": "0 20px"}),
+        html.Div(id="profile-info-message-recipes", style={"maxWidth": "95%", "margin": "0 auto 20px auto", "padding": "0 20px"}),
+        html.Div([
         html.Button("Generate My Weekly Plan 🧑‍🍳", id="generate", n_clicks=0, style={"backgroundColor": "#28a745", "color": "white", "border": "none", "padding": "10px 15px", "borderRadius": "5px"}),
-        html.Button("Generate with HuggingFace 🤗", id="generate_hf", n_clicks=0, style={
-            "backgroundColor": "#6f42c1",
+            html.Button("Generate with HuggingFace 🤗", id="generate_hf", n_clicks=0, style={
+                "backgroundColor": "#6f42c1",
             "color": "white",
             "border": "none",
             "padding": "10px 15px",
             "borderRadius": "5px",
             "marginLeft": "10px"
         }),
-        html.Button("Test Recipes", id="test_recipes", n_clicks=0, style={
-            "backgroundColor": "#007bff",
-            "color": "white",
-            "border": "none",
-            "padding": "10px 15px",
-            "borderRadius": "5px",
-            "marginLeft": "10px"
-        }),
-    ], style={"maxWidth": "600px", "margin": "auto"}),
+        ], style={"maxWidth": "95%", "margin": "20px auto", "padding": "0 20px", "textAlign": "center"}),
+        dcc.Loading(
+            id="loading-plan",
+            type="default",
+            children=html.Div(id="plan_output", style={"marginTop": "40px", "maxWidth": "95%", "margin": "auto", "padding": "0 20px"}),
+            style={"marginTop": "40px"}
+        ),
+    ]),
     
-    dcc.Loading(
-        id="loading-plan",
-        type="default",
-        children=html.Div(id="plan_output", style={"marginTop": "40px", "maxWidth": "95%", "margin": "auto", "padding": "0 20px"}),
-        style={"marginTop": "40px"}
-    ),
+    # Grocery List Tab Content
+    html.Div(id="grocery-list-content", style={"display": "none"}, children=[
+        html.Div(id="grocery-list-container", style={"maxWidth": "95%", "margin": "40px auto", "padding": "0 20px"}),
+    ]),
     
-    # Store for plan data (for PDF export)
+    # Store for plan data (for PDF export) and grocery list
     dcc.Store(id="plan-data-store"),
+    dcc.Store(id="grocery-list-store"),
     dcc.Download(id="download-pdf"),
     
-    dcc.Loading(
-        id="loading-test-recipes",
-        type="default",
-        children=html.Div(id="test_recipes_output", style={"maxWidth": "95%", "margin": "40px auto", "padding": "0 20px"}),
-    ),
     html.Hr(),
     html.Div([
         html.H3("Chat with CULINAIRE"),
@@ -269,4 +299,26 @@ layout = html.Div([
 
     dcc.Store(id="latest_plan_data"),
     dcc.Store(id="chat_history"),
+    
+    # Premium Modal
+    dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle("⭐ Premium Features Coming Soon!")),
+        dbc.ModalBody([
+            html.P("We're working hard to bring you amazing premium features!", style={"fontSize": "16px", "marginBottom": "15px"}),
+            html.H5("What's coming:", style={"marginTop": "20px", "marginBottom": "10px", "color": "#28a745"}),
+            html.Ul([
+                html.Li("💾 Save your favorite recipes"),
+                html.Li("🛒 Order groceries directly from your list"),
+                html.Li("📊 Advanced nutrition tracking"),
+                html.Li("🎯 Personalized meal recommendations"),
+                html.Li("📱 Mobile app access"),
+            ], style={"fontSize": "14px", "lineHeight": "2"}),
+            html.P([
+                "Stay tuned for updates! In the meantime, enjoy our free meal planning features.",
+            ], style={"marginTop": "20px", "color": "#6c757d", "fontStyle": "italic"})
+        ]),
+        dbc.ModalFooter([
+            dbc.Button("Close", id="close-premium-modal", className="ms-auto", n_clicks=0)
+        ])
+    ], id="premium-modal", is_open=False),
 ])
