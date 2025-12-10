@@ -34,7 +34,7 @@ layout = html.Div([
     html.Div([
         html.Label("Weight (kg)", style={"marginBottom": "5px", "display": "block"}),
         dcc.Input(
-            id="body_weight",
+          id="body_weight",
             type="number",
             min=0,
             max=300,
