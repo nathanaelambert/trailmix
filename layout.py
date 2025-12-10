@@ -240,8 +240,12 @@ layout = html.Div([
         ], style={"marginBottom": "15px", "padding": "15px", "backgroundColor": "#f8f9fa", "borderRadius": "8px", "overflowX": "auto"}),
 
         html.Button("Save profile", id="save_profile", n_clicks=0, style={
-            "backgroundColor": "#17a2b8", "color": "white", "border": "none", "padding": "8px 12px", "borderRadius": "5px", "marginBottom": "20px", "width": "100%"
+            "backgroundColor": "#17a2b8", "color": "white", "border": "none", "padding": "8px 12px", "borderRadius": "5px", "marginBottom": "10px", "width": "100%"
         }),
+        html.Button("🗑️ Clear my data", id="clear_data", n_clicks=0, style={
+            "backgroundColor": "#dc3545", "color": "white", "border": "none", "padding": "8px 12px", "borderRadius": "5px", "marginBottom": "20px", "width": "100%"
+        }),
+        html.Div(id="clear_data_message", style={"marginBottom": "20px"}),
         ], style={"maxWidth": "600px", "margin": "auto"}),
     ]),
     
@@ -251,15 +255,28 @@ layout = html.Div([
         html.Div(id="profile-info-message-recipes", style={"maxWidth": "95%", "margin": "0 auto 20px auto", "padding": "0 20px"}),
         html.Div([
         html.Button("Generate My Weekly Plan 🧑‍🍳", id="generate", n_clicks=0, style={"backgroundColor": "#28a745", "color": "white", "border": "none", "padding": "10px 15px", "borderRadius": "5px"}),
-            html.Button("Generate with HuggingFace 🤗", id="generate_hf", n_clicks=0, style={
-                "backgroundColor": "#6f42c1",
-            "color": "white",
-            "border": "none",
-            "padding": "10px 15px",
-            "borderRadius": "5px",
-            "marginLeft": "10px"
-        }),
+            # HuggingFace feature temporarily disabled - model not suitable for this task
+            # html.Button("Generate with HuggingFace 🤗", id="generate_hf", n_clicks=0, style={
+            #     "backgroundColor": "#6f42c1",
+            # "color": "white",
+            # "border": "none",
+            # "padding": "10px 15px",
+            # "borderRadius": "5px",
+            # "marginLeft": "10px"
+            # }),
         ], style={"maxWidth": "95%", "margin": "20px auto", "padding": "0 20px", "textAlign": "center"}),
+        html.P(
+            "⚠️ AI-generated suggestions are not medical advice.",
+            style={
+                "textAlign": "center",
+                "color": "#6c757d",
+                "fontSize": "12px",
+                "fontStyle": "italic",
+                "marginTop": "10px",
+                "marginBottom": "20px",
+                "padding": "0 20px"
+            }
+        ),
         dcc.Loading(
             id="loading-plan",
             type="default",
@@ -309,6 +326,7 @@ layout = html.Div([
             html.Ul([
                 html.Li("💾 Save your favorite recipes"),
                 html.Li("🛒 Order groceries directly from your list"),
+                html.Li("💬 Chat with CULINAIRE - AI-powered meal assistant"),
                 html.Li("📊 Advanced nutrition tracking"),
                 html.Li("🎯 Personalized meal recommendations"),
                 html.Li("📱 Mobile app access"),

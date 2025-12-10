@@ -215,6 +215,22 @@ def get_user_profile(email):
     return profile
 
 
+def clear_user_data(email):
+    """Delete all user data from the database (GDPR compliance)."""
+    if not email:
+        return False
+    try:
+        init_db()
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("DELETE FROM user_profiles WHERE email = ?", (email.strip().lower(),))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error clearing user data: {e}")
+        return False
+
+
 def render_profile_dashboard(profile):
     """Create a simple dashboard view from a stored profile."""
     if not profile:
@@ -431,6 +447,219 @@ def extract_json_block(raw_text: str) -> str:
         return trimmed[: last_close + 1]
 
     return trimmed
+
+
+def parse_text_meal_plan(text: str, base_calories: dict) -> dict:
+    """
+    Parse a simple text format meal plan into the JSON structure expected by the app.
+    
+    Expected format:
+    DAY: Monday
+    BREAKFAST: Meal Name
+      Calories: 600
+      Ingredients: Ingredient1 quantity1, Ingredient2 quantity2
+      Recipe: 1. Step one. 2. Step two. 3. Step three.
+    """
+    import sys
+    print(f"🔍 DEBUG parse_text_meal_plan: Input text length: {len(text)} chars", file=sys.stderr, flush=True)
+    print(f"🔍 DEBUG parse_text_meal_plan: First 500 chars: {text[:500]}", file=sys.stderr, flush=True)
+    
+    plan = {
+        "meal_plan": [],
+        "grocery_list": [],
+        "summary": {
+            "average_daily_calories": 0,
+            "estimated_weekly_cost": "CHF 0",
+            "nutrition_focus": "balanced"
+        }
+    }
+    
+    current_day = None
+    current_meal_type = None
+    current_meal = {}
+    
+    lines = text.split('\n')
+    print(f"🔍 DEBUG parse_text_meal_plan: Split into {len(lines)} lines", file=sys.stderr, flush=True)
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Check for day header - be flexible with format
+        if line.upper().startswith('DAY:') or line.upper().startswith('DAY ') or (line.upper().startswith('MONDAY') or line.upper().startswith('TUESDAY') or line.upper().startswith('WEDNESDAY') or line.upper().startswith('THURSDAY') or line.upper().startswith('FRIDAY') or line.upper().startswith('SATURDAY') or line.upper().startswith('SUNDAY')):
+            # If it's just a day name without "DAY:", extract it
+            if not line.upper().startswith('DAY'):
+                # It's just the day name
+                day_name = line.strip()
+            else:
+                day_name = line.split(':', 1)[1].strip() if ':' in line else line.replace('DAY', '').strip()
+            
+            # Save previous meal if exists
+            if current_day and current_meal_type and current_meal:
+                day_entry = next((d for d in plan["meal_plan"] if d.get("day") == current_day), None)
+                if day_entry:
+                    day_entry["meals"][current_meal_type] = current_meal
+                    current_meal = {}
+            
+            # Start new day
+            current_day = day_name
+            current_meal_type = None
+            current_meal = {}
+            
+            # Add day entry if not exists
+            if current_day not in [d.get("day") for d in plan["meal_plan"]]:
+                plan["meal_plan"].append({
+                    "day": current_day,
+                    "meals": {}
+                })
+            continue
+        
+        # Check for meal type header - be flexible
+        elif line.upper().startswith(('BREAKFAST', 'LUNCH', 'DINNER')):
+            # If we don't have a current day yet, create one (model might skip DAY: header)
+            if not current_day:
+                # Try to infer day from context or use a default
+                if len(plan["meal_plan"]) == 0:
+                    current_day = "Monday"
+                else:
+                    # Use the last day or increment
+                    days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                    last_day = plan["meal_plan"][-1].get("day") if plan["meal_plan"] else None
+                    if last_day in days_list:
+                        idx = days_list.index(last_day)
+                        if idx < len(days_list) - 1:
+                            current_day = days_list[idx + 1]
+                        else:
+                            current_day = "Monday"  # Wrap around
+                    else:
+                        current_day = "Monday"
+                
+                if current_day not in [d.get("day") for d in plan["meal_plan"]]:
+                    plan["meal_plan"].append({
+                        "day": current_day,
+                        "meals": {}
+                    })
+            
+            # Save previous meal if exists
+            if current_day and current_meal_type and current_meal:
+                day_entry = next((d for d in plan["meal_plan"] if d.get("day") == current_day), None)
+                if day_entry:
+                    day_entry["meals"][current_meal_type] = current_meal
+                    import sys
+                    print(f"🔍 DEBUG: Saved {current_meal_type} for {current_day}: {current_meal.get('meal', 'N/A')}", file=sys.stderr, flush=True)
+            
+            # Start new meal
+            if ':' in line:
+                meal_type = line.split(':', 1)[0].strip().lower()
+                meal_name = line.split(':', 1)[1].strip()
+            else:
+                # No colon, try to extract meal type from start of line
+                meal_type = line.strip().lower().split()[0] if line.strip() else ""
+                meal_name = line.replace(meal_type, '').strip() if meal_type else ""
+            
+            # Normalize meal type
+            if 'breakfast' in meal_type:
+                current_meal_type = "breakfast"
+            elif 'lunch' in meal_type:
+                current_meal_type = "lunch"
+            elif 'dinner' in meal_type:
+                current_meal_type = "dinner"
+            else:
+                continue  # Skip if we can't identify meal type
+            
+            current_meal = {
+                "meal": meal_name,
+                "ingredients": {},
+                "calories": base_calories.get(current_meal_type, 0),
+                "recipe": ""
+            }
+            import sys
+            print(f"🔍 DEBUG: Started new {current_meal_type} for {current_day}: {meal_name}", file=sys.stderr, flush=True)
+        
+        # Check for calories
+        elif line.upper().startswith('CALORIES:'):
+            if current_meal:
+                try:
+                    cal_text = line.split(':', 1)[1].strip()
+                    cal_num = re.search(r'\d+', cal_text)
+                    if cal_num:
+                        current_meal["calories"] = int(cal_num.group())
+                except:
+                    pass
+        
+        # Check for ingredients
+        elif line.upper().startswith('INGREDIENTS:'):
+            if current_meal:
+                ingredients_text = line.split(':', 1)[1].strip()
+                ingredients = [i.strip() for i in ingredients_text.split(',')]
+                for ing in ingredients:
+                    parts = ing.rsplit(' ', 1)
+                    if len(parts) == 2:
+                        name, qty = parts
+                        current_meal["ingredients"][name.strip()] = qty.strip()
+                    else:
+                        current_meal["ingredients"][ing] = ""
+        
+        # Check for recipe
+        elif line.upper().startswith('RECIPE:'):
+            if current_meal:
+                recipe_text = line.split(':', 1)[1].strip()
+                current_meal["recipe"] = recipe_text
+        
+        # Recipe continuation (indented lines or numbered steps)
+        elif (line.startswith('  ') or line.startswith('\t') or re.match(r'^\d+\.', line)) and current_meal:
+            if current_meal.get("recipe"):
+                current_meal["recipe"] += " " + line.strip()
+            else:
+                current_meal["recipe"] = line.strip()
+    
+    # Save last meal
+    if current_day and current_meal_type and current_meal:
+        day_entry = next((d for d in plan["meal_plan"] if d.get("day") == current_day), None)
+        if day_entry:
+            day_entry["meals"][current_meal_type] = current_meal
+            import sys
+            print(f"🔍 DEBUG: Saved final {current_meal_type} for {current_day}: {current_meal.get('meal', 'N/A')}", file=sys.stderr, flush=True)
+    
+    import sys
+    print(f"🔍 DEBUG parse_text_meal_plan: Final result - {len(plan['meal_plan'])} days", file=sys.stderr, flush=True)
+    for day_entry in plan["meal_plan"]:
+        meals_count = len(day_entry.get("meals", {}))
+        print(f"🔍 DEBUG:   {day_entry.get('day')}: {meals_count} meals ({list(day_entry.get('meals', {}).keys())})", file=sys.stderr, flush=True)
+    
+    # Generate grocery list from ingredients
+    ingredient_map = {}
+    for day_entry in plan["meal_plan"]:
+        meals = day_entry.get("meals", {})
+        for meal_type in ["breakfast", "lunch", "dinner"]:
+            if meal_type in meals:
+                meal = meals[meal_type]
+                for ing_name, ing_qty in meal.get("ingredients", {}).items():
+                    if ing_name:
+                        if ing_name.lower() not in ingredient_map:
+                            ingredient_map[ing_name.lower()] = {
+                                "item": ing_name,
+                                "quantity": ing_qty or "1",
+                                "category": "Other"
+                            }
+    
+    plan["grocery_list"] = list(ingredient_map.values())
+    
+    # Calculate summary
+    total_cals = 0
+    day_count = 0
+    for day_entry in plan["meal_plan"]:
+        meals = day_entry.get("meals", {})
+        day_cals = sum(meals.get(m, {}).get("calories", 0) for m in ["breakfast", "lunch", "dinner"])
+        if day_cals > 0:
+            total_cals += day_cals
+            day_count += 1
+    
+    if day_count > 0:
+        plan["summary"]["average_daily_calories"] = round(total_cals / day_count)
+    
+    return plan
 
 
 def aggregate_grocery_list_from_plan(plan: dict) -> list:
@@ -1413,6 +1642,9 @@ def generate_plan(n, weight, activity_hours, goals, budget, calories, restrictio
 
 
 def generate_plan_hf(n, weight, activity_hours, goals, budget, calories, restrictions, diet, location, avoid_ingredients="", cravings="", complexity="medium", cuisines=None, portions=None):
+    import sys
+    print(f"🔍 DEBUG generate_plan_hf: Function called with calories={calories}, diet={diet}", file=sys.stderr, flush=True)
+    
     # Default portions if not provided
     if portions is None:
         portions = {"breakfast": 1, "lunch": 1, "dinner": 1}
@@ -1462,68 +1694,97 @@ def generate_plan_hf(n, weight, activity_hours, goals, budget, calories, restric
         base_calories["dinner"]
     )
     
-    user_prompt = f"""
-    You are CULINAIRE. Create a 7-day meal plan as pure JSON only.
-    Do NOT include the prompt or any text outside the JSON. No ellipses.
-    - Body weight: {weight} kg
-    - Activity: {activity_hours} hours/week
-    - Goals: {', '.join(goals or [])}
-    - Diet: {diet}
-    - Restrictions: {restrictions or 'None'}
-    - Target calories: {calories} kcal/day
-    - Budget: {budget} CHF
-    - Location: {location}
-    - Complexity: {complexity_desc}
-    {f"- Avoid: {avoid_ingredients}" if avoid_ingredients else ""}
-    {f"- Cravings: {cravings}" if cravings else ""}
-    {f"- Cuisines: {', '.join(cuisines or [])}" if cuisines else ""}
-    {portions_info}
-    
-    ⚠️ CALORIE TARGETS (IGNORE DAILY TOTALS, FOCUS ON PER-MEAL):
-    
-    Generate EACH MEAL independently with these FIXED targets:
-    - Every breakfast: {base_calories['breakfast']} kcal per person
-    - Every lunch: {base_calories['lunch']} kcal per person
-    - Every dinner: {base_calories['dinner']} kcal per person
-    
-    DO NOT look at daily totals. DO NOT adjust meals based on other meals that day.
-    "calories" field = per-person target. Scale INGREDIENTS for portions.
-    For SKIP: {{"meal": "Skipped", "calories": 0, "ingredients": {{}}, "recipe": "No meal planned"}}
-    CRAVINGS: Use in ONLY 1-2 meals during ENTIRE week
-    GROCERY LIST: Sum all ingredients, skip 0-portion meals
+    # Use simple text format - SHORTENED prompt to avoid truncation
+    user_prompt = f"""Create a 7-day meal plan.
 
-    Return exactly this shape (no extra keys):
-    {{
-      "meal_plan": [
-        {{"day": "Monday", "meals": {{"breakfast": {{}}, "lunch": {{}}, "dinner": {{}}}}}},
-        {{"day": "Tuesday", "meals": {{"breakfast": {{}}, "lunch": {{}}, "dinner": {{}}}}}},
-        {{"day": "Wednesday", "meals": {{"breakfast": {{}}, "lunch": {{}}, "dinner": {{}}}}}},
-        {{"day": "Thursday", "meals": {{"breakfast": {{}}, "lunch": {{}}, "dinner": {{}}}}}},
-        {{"day": "Friday", "meals": {{"breakfast": {{}}, "lunch": {{}}, "dinner": {{}}}}}},
-        {{"day": "Saturday", "meals": {{"breakfast": {{}}, "lunch": {{}}, "dinner": {{}}}}}},
-        {{"day": "Sunday", "meals": {{"breakfast": {{}}, "lunch": {{}}, "dinner": {{}}}}}}
-      ],
-      "grocery_list": [{{"item": "Bananas", "quantity": "6", "category": "Produce"}}],
-      "summary": {{"average_daily_calories": 0, "estimated_weekly_cost": "CHF 0", "nutrition_focus": "balanced"}}
-    }}
-    Each meal: "meal", "ingredients" (dict), "calories" (number = {base_calories['breakfast']}/{base_calories['lunch']}/{base_calories['dinner']}), "recipe".
-    """
+User: {calories} cal/day, {diet} diet{f", avoid {avoid_ingredients}" if avoid_ingredients else ""}{f", likes {cravings}" if cravings else ""}
+
+Format:
+DAY: Monday
+BREAKFAST: Meal Name
+  Calories: {base_calories['breakfast']}
+  Ingredients: Item1 qty1, Item2 qty2
+  Recipe: 1. Step one. 2. Step two. 3. Step three.
+LUNCH: Meal Name
+  Calories: {base_calories['lunch']}
+  Ingredients: Item1 qty1, Item2 qty2
+  Recipe: 1. Step one. 2. Step two. 3. Step three.
+DINNER: Meal Name
+  Calories: {base_calories['dinner']}
+  Ingredients: Item1 qty1, Item2 qty2
+  Recipe: 1. Step one. 2. Step two. 3. Step three.
+
+Repeat for all 7 days: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday."""
     raw_content = ""
     json_text = ""
     plan_payload = None
     try:
         pipe = get_hf_pipeline()
+        tokenizer = pipe.tokenizer
+        # Check for repetitive output and stop early if detected
         raw_output = pipe(
             user_prompt,
-            max_length=900,
-            temperature=0.2,
+            max_new_tokens=1500,  # Reduced further to prevent excessive generation
+            temperature=0.9,  # Higher temperature for more variety
             do_sample=True,
             truncation=True,
             return_full_text=False,
-        )[0]
-        raw_content = raw_output.get("generated_text") or ""
-        json_text = extract_json_block(raw_content)
-        plan = load_plan(json_text)
+            pad_token_id=tokenizer.eos_token_id if tokenizer.eos_token_id else None,
+            repetition_penalty=2.0,  # Strong repetition penalty to prevent loops
+            no_repeat_ngram_size=2,  # Prevent repeating 2-grams
+        )
+        
+        # Handle pipeline output
+        import sys
+        if isinstance(raw_output, list) and len(raw_output) > 0:
+            raw_output = raw_output[0]
+            print(f"🔍 DEBUG: Extracted from list, type: {type(raw_output)}", file=sys.stderr, flush=True)
+        
+        if isinstance(raw_output, dict):
+            raw_content = raw_output.get("generated_text", "")
+            print(f"🔍 DEBUG: Got generated_text from dict, length: {len(raw_content)}", file=sys.stderr, flush=True)
+        elif isinstance(raw_output, str):
+            raw_content = raw_output
+            print(f"🔍 DEBUG: Got string output, length: {len(raw_content)}", file=sys.stderr, flush=True)
+        else:
+            raw_content = str(raw_output) if raw_output else ""
+            print(f"🔍 DEBUG: Converted to string, length: {len(raw_content)}", file=sys.stderr, flush=True)
+        
+        # If return_full_text=True, we need to extract just the generated part (after the prompt)
+        # The generated_text includes the prompt, so we need to remove it
+        if user_prompt in raw_content:
+            # Find where the prompt ends and extract only the generated part
+            prompt_end = raw_content.find(user_prompt) + len(user_prompt)
+            raw_content = raw_content[prompt_end:].strip()
+            print(f"🔍 DEBUG: Extracted generated part (after prompt), length: {len(raw_content)}", file=sys.stderr, flush=True)
+        print(f"🔍 DEBUG: Raw output length: {len(raw_content)} chars", file=sys.stderr, flush=True)
+        print(f"🔍 DEBUG: First 500 chars: {raw_content[:500]}", file=sys.stderr, flush=True)
+        print(f"🔍 DEBUG: Last 500 chars: {raw_content[-500:]}", file=sys.stderr, flush=True)
+        
+        # Check for repetitive output (model stuck in loop)
+        if raw_content and len(raw_content) > 100:
+            # Check if output is mostly repetitive
+            words = raw_content.split()
+            if len(words) > 10:
+                unique_words = len(set(words[:50]))  # Check first 50 words
+                if unique_words < 5:  # Less than 5 unique words in first 50 = repetitive
+                    raise ValueError(f"HuggingFace model generated repetitive output (only {unique_words} unique words in first 50). The model may not be suitable for this task. Please use the 'Generate My Weekly Plan' button instead.")
+        
+        if not raw_content or not raw_content.strip():
+            raise ValueError("HuggingFace model returned empty output.")
+        
+        # Parse the text format instead of JSON
+        print(f"🔍 DEBUG: Parsing text format meal plan...", file=sys.stderr, flush=True)
+        print(f"🔍 DEBUG: Raw content (first 2000 chars):\n{raw_content[:2000]}", file=sys.stderr, flush=True)
+        plan = parse_text_meal_plan(raw_content, base_calories)
+        print(f"🔍 DEBUG: Successfully parsed! Found {len(plan.get('meal_plan', []))} days", file=sys.stderr, flush=True)
+        if len(plan.get('meal_plan', [])) == 0:
+            print(f"⚠️ WARNING: Parser found 0 days!", file=sys.stderr, flush=True)
+            print(f"⚠️ WARNING: Full raw content:\n{raw_content}", file=sys.stderr, flush=True)
+            print(f"⚠️ WARNING: Plan structure: {plan}", file=sys.stderr, flush=True)
+        
+        # Convert to JSON for compatibility
+        json_text = json.dumps(plan)
         # Fix calories in code - override LLM's calorie values with correct per-portion targets
         plan = fix_calories_in_plan(plan, calories, portions)
         # Update the JSON payload with corrected calories
@@ -2034,7 +2295,6 @@ def chat_with_agent(user_message, history, plan_data, email, form_fields):
     Output("latest_plan_data", "data"),
     Output("plan-data-store", "data"),
     Input("generate", "n_clicks"),
-    Input("generate_hf", "n_clicks"),
     State("body_weight", "value"),
     State("activity_hours", "value"),
     State("goals", "value"),
@@ -2053,21 +2313,20 @@ def chat_with_agent(user_message, history, plan_data, email, form_fields):
     State("cuisines", "value"),
     State({"type": "portion", "day": ALL, "meal": ALL}, "value"),
 )
-def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity_hours, goals, budget, calories, restrictions, diet, location, budget_ignore, calories_ignore, email, name, avoid_ingredients, cravings, complexity, cuisines, portion_values):
+def handle_generate_plan(n_clicks, weight, activity_hours, goals, budget, calories, restrictions, diet, location, budget_ignore, calories_ignore, email, name, avoid_ingredients, cravings, complexity, cuisines, portion_values):
     print(f"\n{'='*60}")
     print(f"🔥 GENERATE CALLBACK FIRED!")
     print(f"   n_clicks={n_clicks} (type: {type(n_clicks)})")
-    print(f"   n_clicks_hf={n_clicks_hf} (type: {type(n_clicks_hf)})")
     print(f"   weight={weight}, activity_hours={activity_hours}")
     print(f"   goals={goals}")
     print(f"{'='*60}\n")
     
-    if n_clicks is None and n_clicks_hf is None:
-        print("   ❌ PreventUpdate - both None")
+    if n_clicks is None:
+        print("   ❌ PreventUpdate - n_clicks is None")
         raise PreventUpdate
     
-    if (n_clicks or 0) == 0 and (n_clicks_hf or 0) == 0:
-        print("   ❌ PreventUpdate - both zero")
+    if (n_clicks or 0) == 0:
+        print("   ❌ PreventUpdate - n_clicks is zero")
         raise PreventUpdate
 
     ctx = callback_context
@@ -2103,36 +2362,9 @@ def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity_hours, goals, b
     
     print(f"   📊 Parsed portions: {portions}")
 
-    if trigger == "generate_hf":
-        plan_view, plan_raw = generate_plan_hf(
-            n_clicks_hf,
-            weight,
-            activity_hours,
-            goals or [],
-            budget_value,
-            calorie_target,
-            restrictions or "None",
-            diet,
-            location or "Not specified",
-            avoid_ingredients or "",
-            cravings or "",
-            complexity or "medium",
-            cuisines or [],
-            portions,
-        )
-
-        plan_data = {
-            "raw_json": plan_raw,
-            "provider": "huggingface",
-            "generated_at": datetime.utcnow().isoformat(),
-            "email": email,
-            "name": name,
-            "weight": weight,
-            "calorie_target": calorie_target,
-            "portions": portions,
-        }
-        plan_data = enrich_plan_with_migros(plan_data)
-        return plan_view, plan_data, plan_data
+    # HuggingFace feature disabled - model not suitable for this task
+    # if trigger == "generate_hf":
+    #     ... (removed)
 
     plan_view, plan_raw = generate_plan(
         n_clicks,
@@ -2203,6 +2435,7 @@ def persist_profile(plan_data, save_clicks, load_clicks, email, name, weight, ac
             return render_profile_dashboard(None), html.Span("No saved profile found for that email yet.", style={"color": "#dc3545"}), no_update
         return render_profile_dashboard(profile), html.Span("Loaded saved profile.", style={"color": "#198754"}), no_update
 
+    # Handle save_profile trigger
     last_plan = None
     if isinstance(plan_data, dict):
         last_plan = plan_data.get("raw_json")
@@ -2248,6 +2481,43 @@ def persist_profile(plan_data, save_clicks, load_clicks, email, name, weight, ac
         return render_profile_dashboard(profile), html.Span(msg, style={"color": "#198754"}), "recipes"
     else:
         return render_profile_dashboard(profile), html.Span(msg, style={"color": "#198754"}), no_update
+
+
+# -------------------- CLEAR USER DATA (GDPR COMPLIANCE) --------------------
+
+@app.callback(
+    Output("clear_data_message", "children"),
+    Input("clear_data", "n_clicks"),
+    State("user_email", "value"),
+    prevent_initial_call=True,
+)
+def handle_clear_data(n_clicks, email):
+    """Handle GDPR data deletion request."""
+    if not n_clicks or n_clicks == 0:
+        raise PreventUpdate
+    
+    if not email:
+        return dbc.Alert(
+            "Please enter your email address first to clear your data.",
+            color="warning",
+            style={"marginTop": "10px"}
+        )
+    
+    # Clear the data
+    success = clear_user_data(email)
+    
+    if success:
+        return dbc.Alert(
+            "✅ Your data has been successfully deleted from our database (GDPR compliant).",
+            color="success",
+            style={"marginTop": "10px"}
+        )
+    else:
+        return dbc.Alert(
+            "❌ An error occurred while clearing your data. Please try again or contact support.",
+            color="danger",
+            style={"marginTop": "10px"}
+        )
 
 
 @app.callback(
@@ -2306,53 +2576,43 @@ def populate_profile_fields(n_clicks, email):
     )
 
 
+# Chat callback disabled - now opens premium modal instead
 @app.callback(
-    Output("chat_output", "children"),
-    Output("chat_history", "data"),
+    Output("premium-modal", "is_open", allow_duplicate=True),
     Input("send_chat", "n_clicks"),
-    State("chat_input", "value"),
-    State("chat_history", "data"),
-    State("latest_plan_data", "data"),
-    State("user_email", "value"),
-    State("body_weight", "value"),
-    State("budget", "value"),
-    State("dayly_calories", "value"),
-    State("activity_hours", "value"),
-    State("diet_type", "value"),
-    State("location", "value"),
-    State("goals", "value"),
-    State("restrictions", "value"),
-    State("budget_ignore", "value"),
-    State("calories_ignore", "value"),
-    prevent_initial_call=True,
+    prevent_initial_call=True
 )
-def handle_chat(n_clicks, user_message, history, plan_data, email, weight, budget, calories, activity_hours, diet, location, goals, restrictions, budget_ignore, calories_ignore):
-    if not n_clicks or not user_message:
-        raise PreventUpdate
+def open_premium_modal_from_chat(n_clicks):
+    """Open premium modal when Send button in chat is clicked."""
+    if n_clicks and n_clicks > 0:
+        return True
+    raise PreventUpdate
 
-    history = history or []
-    try:
-        form_fields = (
-            weight,
-            budget,
-            calories,
-            activity_hours,
-            diet,
-            location,
-            goals,
-            restrictions,
-            budget_ignore,
-            calories_ignore,
-        )
-        answer = chat_with_agent(user_message, history, plan_data, email, form_fields)
-    except Exception as e:
-        answer = f"Sorry, the chat agent ran into an error: {e}"
-
-    updated_history = history + [
-        {"role": "user", "content": user_message},
-        {"role": "assistant", "content": answer},
-    ]
-    return render_chat(updated_history), updated_history
+# Original chat callback disabled - chat is now a premium feature
+# @app.callback(
+#     Output("chat_output", "children"),
+#     Output("chat_history", "data"),
+#     Input("send_chat", "n_clicks"),
+#     State("chat_input", "value"),
+#     State("chat_history", "data"),
+#     State("latest_plan_data", "data"),
+#     State("user_email", "value"),
+#     State("body_weight", "value"),
+#     State("budget", "value"),
+#     State("dayly_calories", "value"),
+#     State("activity_hours", "value"),
+#     State("diet_type", "value"),
+#     State("location", "value"),
+#     State("goals", "value"),
+#     State("restrictions", "value"),
+#     State("budget_ignore", "value"),
+#     State("calories_ignore", "value"),
+#     prevent_initial_call=True,
+# )
+# def handle_chat(n_clicks, user_message, history, plan_data, email, weight, budget, calories, activity_hours, diet, location, goals, restrictions, budget_ignore, calories_ignore):
+#     if not n_clicks or not user_message:
+#         raise PreventUpdate
+#     ... (disabled - chat is now premium)
 
 
 # -------------------- PROFILE SUMMARY FOR RECIPES TAB --------------------
