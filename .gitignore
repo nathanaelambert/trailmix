@@ -2,3 +2,10 @@
 .venv/
 .venv/
 *.db
+__pycache__/
+migros-api-wrpper/
+migros_price_helper.js
+migros-api-wrapper
+.DS_Store
+.vscode/
+
