@@ -21,29 +21,61 @@ def numeric_scale(qty, scale):
     return qty_str
 
 def rescale_day(day_dict, target):
+    """
+    Rescale ingredients only - DO NOT rescale calories.
+    Calories are now fixed per meal per portion in code (see fix_calories_in_plan).
+    This function is kept for ingredient scaling if needed, but calories are preserved.
+    """
     meals = ["breakfast","lunch","dinner"]
+    # Calculate scale based on current calories, but DON'T apply it to calories
     total = sum(day_dict[m].get("calories", 0) for m in meals if m in day_dict)
     if total <= 0: return day_dict
     scale = target / total
+    # Only scale ingredients, NOT calories (calories are fixed in code)
     for m in meals:
         if m not in day_dict: continue
         meal = day_dict[m]
-        meal["calories"] = round(meal.get("calories", 0) * scale)
+        # DO NOT rescale calories - they are fixed per meal per portion
+        # meal["calories"] = round(meal.get("calories", 0) * scale)  # REMOVED
+        # Only scale ingredients if needed (though LLM should already scale them for portions)
         for k,v in meal.get("ingredients", {}).items():
             meal["ingredients"][k] = numeric_scale(v, scale)
     return day_dict
 
 def normalize_mealplan(mp):
+    import sys
+    print(f"🔍 DEBUG normalize_mealplan: input type: {type(mp)}, length: {len(mp) if isinstance(mp, (list, dict)) else 'N/A'}", file=sys.stderr, flush=True)
+    
     if isinstance(mp, list):
+        # Fix string entries - try to parse them as JSON
+        fixed_mp = []
+        for i, d in enumerate(mp):
+            print(f"🔍 DEBUG normalize_mealplan: entry {i} type: {type(d)}", file=sys.stderr, flush=True)
+            if isinstance(d, str):
+                try:
+                    import json
+                    d = json.loads(d)
+                    print(f"🔍 DEBUG normalize_mealplan: parsed string entry {i} to dict", file=sys.stderr, flush=True)
+                except (json.JSONDecodeError, TypeError) as e:
+                    print(f"⚠️ DEBUG normalize_mealplan: failed to parse entry {i}: {e}", file=sys.stderr, flush=True)
+                    continue  # Skip invalid entries
+            if isinstance(d, dict):
+                print(f"🔍 DEBUG normalize_mealplan: entry {i} is dict, keys: {d.keys() if isinstance(d, dict) else 'N/A'}", file=sys.stderr, flush=True)
+                fixed_mp.append(d)
+        mp = fixed_mp
+        print(f"🔍 DEBUG normalize_mealplan: after fixing, {len(mp)} entries", file=sys.stderr, flush=True)
         pairs = [(d.get("day", f"Day {i+1}"), d.get("meals", d)) for i, d in enumerate(mp)]
     elif isinstance(mp, dict):
         pairs = [(k.replace("_", " ").title(), v) for k,v in mp.items()]
     else:
+        print(f"⚠️ DEBUG normalize_mealplan: input is neither list nor dict, returning empty", file=sys.stderr, flush=True)
         return []
 
     normalized = []
     for day_name, meals in pairs:
+        print(f"🔍 DEBUG normalize_mealplan: processing day '{day_name}', meals type: {type(meals)}", file=sys.stderr, flush=True)
         normalized.append((day_name, normalize_day_structure(meals)))
+    print(f"🔍 DEBUG normalize_mealplan: returning {len(normalized)} normalized days", file=sys.stderr, flush=True)
     return normalized
 
 
