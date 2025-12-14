@@ -34,11 +34,13 @@ source "${VENV_DIR}/bin/activate"
 echo "Upgrading pip..."
 python -m pip install --upgrade pip
 
-echo "Installing project dependencies (pinned, CPU torch)..."
-pip install "dash>=2.15,<3" "dash-bootstrap-components>=1.5,<2" "gunicorn>=21,<22" \
-            "openai>=1.35,<2" "python-dotenv>=1,<2" \
-            "numpy>=1.24,<2" "transformers>=4.39,<4.42" \
-            torch==2.2.2 --extra-index-url https://download.pytorch.org/whl/cpu
+echo "Installing project dependencies from requirements.txt..."
+pip install -r "${PROJECT_DIR}/requirements.txt"
+
+if [ "${INSTALL_HF:-0}" = "1" ]; then
+  echo "Installing optional HuggingFace dependencies..."
+  pip install "transformers>=4.39,<4.42" torch==2.2.2 --extra-index-url https://download.pytorch.org/whl/cpu
+fi
 
 echo "Done. Activate with: source ${VENV_DIR}/bin/activate"
 echo "If pyenv isn’t found in new shells, add to ~/.bashrc:"

@@ -2228,7 +2228,7 @@ def get_llama_agent():
 def render_chat(history):
     if not history:
         return html.Div("Ask me anything about meals, groceries, or nutrition.")
-        blocks = []
+    blocks = []
     for msg in history:
         role = msg.get("role")
         content = msg.get("content")
@@ -2576,43 +2576,69 @@ def populate_profile_fields(n_clicks, email):
     )
 
 
-# Chat callback disabled - now opens premium modal instead
 @app.callback(
+    Output("chat_output", "children"),
+    Output("chat_history", "data"),
     Output("premium-modal", "is_open", allow_duplicate=True),
+    Output("chat_input", "value"),
     Input("send_chat", "n_clicks"),
-    prevent_initial_call=True
+    State("chat_input", "value"),
+    State("chat_history", "data"),
+    State("latest_plan_data", "data"),
+    State("user_email", "value"),
+    State("body_weight", "value"),
+    State("budget", "value"),
+    State("dayly_calories", "value"),
+    State("activity_hours", "value"),
+    State("diet_type", "value"),
+    State("location", "value"),
+    State("goals", "value"),
+    State("restrictions", "value"),
+    State("budget_ignore", "value"),
+    State("calories_ignore", "value"),
+    State("premium_status", "data"),
+    prevent_initial_call=True,
 )
-def open_premium_modal_from_chat(n_clicks):
-    """Open premium modal when Send button in chat is clicked."""
-    if n_clicks and n_clicks > 0:
-        return True
-    raise PreventUpdate
+def handle_chat(n_clicks, user_message, history, plan_data, email, weight, budget, calories, activity_hours, diet, location, goals, restrictions, budget_ignore, calories_ignore, premium_data):
+    """Handle chat interactions; require premium status to chat."""
+    if not n_clicks:
+        raise PreventUpdate
 
-# Original chat callback disabled - chat is now a premium feature
-# @app.callback(
-#     Output("chat_output", "children"),
-#     Output("chat_history", "data"),
-#     Input("send_chat", "n_clicks"),
-#     State("chat_input", "value"),
-#     State("chat_history", "data"),
-#     State("latest_plan_data", "data"),
-#     State("user_email", "value"),
-#     State("body_weight", "value"),
-#     State("budget", "value"),
-#     State("dayly_calories", "value"),
-#     State("activity_hours", "value"),
-#     State("diet_type", "value"),
-#     State("location", "value"),
-#     State("goals", "value"),
-#     State("restrictions", "value"),
-#     State("budget_ignore", "value"),
-#     State("calories_ignore", "value"),
-#     prevent_initial_call=True,
-# )
-# def handle_chat(n_clicks, user_message, history, plan_data, email, weight, budget, calories, activity_hours, diet, location, goals, restrictions, budget_ignore, calories_ignore):
-#     if not n_clicks or not user_message:
-#         raise PreventUpdate
-#     ... (disabled - chat is now premium)
+    premium_data = premium_data or {}
+    if not premium_data.get("is_premium"):
+        # Open modal to prompt upgrade
+        return no_update, no_update, True, no_update
+
+    if not user_message or not str(user_message).strip():
+        raise PreventUpdate
+
+    history = history or []
+    user_message = str(user_message).strip()
+    history.append({"role": "user", "content": user_message})
+
+    form_fields = (
+        weight,
+        budget,
+        calories,
+        activity_hours,
+        diet,
+        location,
+        goals,
+        restrictions,
+        budget_ignore,
+        calories_ignore,
+    )
+
+    try:
+        agent_reply = chat_with_agent(user_message, history, plan_data, email, form_fields)
+    except Exception as e:
+        print(f"Chat error: {e}")
+        agent_reply = "Sorry, I ran into an error while answering that. Please try again."
+
+    history.append({"role": "assistant", "content": agent_reply})
+    return render_chat(history), history, False, ""
+
+# Chat features gated behind premium remain for other entry points below.
 
 
 # -------------------- PROFILE SUMMARY FOR RECIPES TAB --------------------
@@ -2735,6 +2761,65 @@ def render_profile_summary_recipes(email, name, weight, budget, budget_ignore, c
 
 
 # -------------------- PREMIUM MODAL CALLBACKS --------------------
+
+# Update the premium CTA text when a user verifies their email
+@app.callback(
+    Output("open-premium-modal", "children"),
+    Input("premium_status", "data"),
+)
+def update_premium_button_label(premium_data):
+    """Show a badge-style label once premium is active."""
+    if premium_data and premium_data.get("is_premium"):
+        email = premium_data.get("email")
+        if email:
+            return f"✅ Premium ({email})"
+        return "✅ Premium active"
+    return "⭐ Go Premium"
+
+
+# Verify EPFL student emails and mark the session as premium
+@app.callback(
+    Output("premium-email-status", "children"),
+    Output("premium-email-status", "color"),
+    Output("premium-email-status", "is_open"),
+    Output("premium_status", "data"),
+    Output("premium-modal", "is_open", allow_duplicate=True),
+    Input("verify-premium-email", "n_clicks"),
+    State("premium-email-input", "value"),
+    State("premium_status", "data"),
+    prevent_initial_call=True,
+)
+def verify_premium_email(n_clicks, email, premium_data):
+    """Validate EPFL email addresses and activate premium for the session."""
+    if not n_clicks:
+        raise PreventUpdate
+
+    premium_data = premium_data or {"is_premium": False, "email": None}
+
+    if not email:
+        return (
+            "Please enter your EPFL student email to continue.",
+            "danger",
+            True,
+            premium_data,
+            True,
+        )
+
+    email = email.strip()
+    epfl_pattern = r"^[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\.)*epfl\.ch$"
+    if not re.match(epfl_pattern, email, re.IGNORECASE):
+        return (
+            "That doesn't look like an EPFL email. Try something like name@epfl.ch.",
+            "danger",
+            True,
+            premium_data,
+            True,
+        )
+
+    updated_data = {"is_premium": True, "email": email.lower()}
+    success_message = f"Student email verified! Premium unlocked for {email}."
+    return success_message, "success", True, updated_data, True
+
 
 # Simple callback for premium modal - handles all premium buttons
 @app.callback(

@@ -316,13 +316,26 @@ layout = html.Div([
 
     dcc.Store(id="latest_plan_data"),
     dcc.Store(id="chat_history"),
+    dcc.Store(id="premium_status", data={"is_premium": False, "email": None}),
     
     # Premium Modal
     dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle("⭐ Premium Features Coming Soon!")),
+        dbc.ModalHeader(dbc.ModalTitle("⭐ Unlock Premium Access")),
         dbc.ModalBody([
-            html.P("We're working hard to bring you amazing premium features!", style={"fontSize": "16px", "marginBottom": "15px"}),
-            html.H5("What's coming:", style={"marginTop": "20px", "marginBottom": "10px", "color": "#28a745"}),
+            html.P("EPFL students get immediate access to premium. Verify your @epfl.ch email to unlock.", style={"fontSize": "16px", "marginBottom": "15px"}),
+            html.H5("Student verification", style={"marginTop": "10px", "marginBottom": "10px", "color": "#17a2b8"}),
+            dbc.Input(
+                id="premium-email-input",
+                type="email",
+                placeholder="firstname.lastname@epfl.ch",
+                debounce=True,
+                className="mb-2"
+            ),
+            dbc.Button("Verify student email", id="verify-premium-email", color="primary", n_clicks=0, className="mb-2"),
+            dbc.Alert(id="premium-email-status", is_open=False, color="info", className="mt-1"),
+            html.P("We accept EPFL student emails ending with @epfl.ch.", style={"fontSize": "12px", "color": "#6c757d", "marginBottom": "0"}),
+            html.Hr(),
+            html.H5("What's included:", style={"marginTop": "10px", "marginBottom": "10px", "color": "#28a745"}),
             html.Ul([
                 html.Li("💾 Save your favorite recipes"),
                 html.Li("🛒 Order groceries directly from your list"),
@@ -332,7 +345,7 @@ layout = html.Div([
                 html.Li("📱 Mobile app access"),
             ], style={"fontSize": "14px", "lineHeight": "2"}),
             html.P([
-                "Stay tuned for updates! In the meantime, enjoy our free meal planning features.",
+                "Stay tuned for more premium upgrades.",
             ], style={"marginTop": "20px", "color": "#6c757d", "fontStyle": "italic"})
         ]),
         dbc.ModalFooter([
