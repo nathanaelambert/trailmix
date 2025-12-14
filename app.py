@@ -1,4 +1,4 @@
-from dash import Dash, Input, Output, State, html, dcc, callback_context, no_update, ALL, MATCH, dcc
+from dash import Dash, Input, Output, State, html, dcc, callback_context, no_update, ALL, MATCH
 from flask import send_file
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
@@ -28,6 +28,7 @@ from llama_index.core.tools import FunctionTool
 from llama_index.core.agent import ReActAgent
 
 app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY], suppress_callback_exceptions=True)
+server = app.server
 
 app.title = "CULINAIRE 🥗"
 
@@ -3215,5 +3216,7 @@ def download_pdf(n_clicks, plan_data, grocery_list):
 
 
 # -------------------- MAIN --------------------
-if __name__ == '__main__':
-    app.run(debug=False)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8050))
+    app.run_server(host="0.0.0.0", port=port, debug=False)
+
