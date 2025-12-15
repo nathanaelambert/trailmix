@@ -255,15 +255,19 @@ layout = html.Div([
         html.Div(id="profile-info-message-recipes", style={"maxWidth": "95%", "margin": "0 auto 20px auto", "padding": "0 20px"}),
         html.Div([
         html.Button("Generate My Weekly Plan 🧑‍🍳", id="generate", n_clicks=0, style={"backgroundColor": "#28a745", "color": "white", "border": "none", "padding": "10px 15px", "borderRadius": "5px"}),
-            # HuggingFace feature temporarily disabled - model not suitable for this task
-            # html.Button("Generate with HuggingFace 🤗", id="generate_hf", n_clicks=0, style={
-            #     "backgroundColor": "#6f42c1",
-            # "color": "white",
-            # "border": "none",
-            # "padding": "10px 15px",
-            # "borderRadius": "5px",
-            # "marginLeft": "10px"
-            # }),
+        html.Button(
+            "Generate with HuggingFace 🤗",
+            id="generate_hf",
+            n_clicks=0,
+            style={
+                "backgroundColor": "#6f42c1",
+                "color": "white",
+                "border": "none",
+                "padding": "10px 15px",
+                "borderRadius": "5px",
+                "marginLeft": "10px"
+            }
+        ),
         ], style={"maxWidth": "95%", "margin": "20px auto", "padding": "0 20px", "textAlign": "center"}),
         html.P(
             "⚠️ AI-generated suggestions are not medical advice.",

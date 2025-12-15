@@ -1,0 +1,71 @@
+CULINAIRE Product Feature Report
+Scope: Feature-level description of the Dash-based meal planner implemented in app.py (with layout.py helpers).
+
+1) Application Overview
+- Purpose: AI-assisted weekly meal planner with grocery automation and chat support.
+- Stack: Dash + Flask UI, SQLite persistence, OpenAI/OpenRouter LLMs, optional Hugging Face Flax T5, ReportLab PDF export, DuckDuckGo search via llama-index agent, Node helper for Migros pricing.
+- Entry: app.py initializes the Dash app and Flask server; layout.py defines the user-facing layout (tabs, forms, chat, premium modal).
+
+2) Navigation & Layout (layout.py)
+- Tabs: User Info (profile capture), Recipes (plan generation/output), Grocery List (editable list). Tab visibility is controlled by callbacks.
+- Always-visible chat panel: “Chat with CULINAIRE” accepts free-form questions, gated by premium status.
+- Persistent client stores: plan-data-store (plan JSON, metadata), grocery-list-store (current grocery items), latest_plan_data (plan snapshot), chat_history, premium_status.
+
+3) Profile Capture & Persistence
+- Inputs: email (key), name, weight, activity hours/week, goals (multi-select), budget, calorie target, restrictions/allergies, diet, location, avoid ingredients, cravings, complexity, cuisines, per-meal per-day portions.
+- Persistence: SQLite table user_profiles (DB_PATH env override). save_user_profile inserts/updates with last plan JSON and per-meal portions; get_user_profile loads; clear_user_data supports GDPR deletion.
+- Dashboard: render_profile_dashboard shows saved fields, last plan preview, and portion customization status.
+- Load/save flows: populate_profile_fields hydrates form controls from DB; clear_data button deletes the user row.
+
+4) Meal Plan Generation (OpenAI/OpenRouter path)
+- Trigger: “Generate My Weekly Plan” button calls generate_plan.
+- Prompting: SYSTEM_PROMPT enforces strict JSON with 7-day structure, grocery list, summary fields, and recipe format; user prompt blends profile fields, complexity, cuisines, cravings/avoid lists, and per-meal portion info.
+- Calorie model: fix_calories_in_plan overrides model output to fixed per-person targets (25/35/40% of daily calories for breakfast/lunch/dinner) and zeros skipped meals; portion multipliers adjust ingredient scaling instructions.
+- Rendering: render_plan_view builds per-day collapsible cards, horizontal meal cards, ingredient chips, recipe step formatting, portion-aware calorie labels, and CTA buttons (“Save”, “Change”).
+- Persistence: plan_data includes raw_json, provider, metadata, and portions; enrich_plan_with_migros can add pricing estimates.
+
+5) Single-Meal Regeneration
+- “Change” button per meal calls change_single_meal to regenerate one meal with a targeted prompt (per-meal calories, restrictions, diet, portions).
+- Updates: replaces the meal inside plan_data, recalculates grocery list via aggregate_grocery_list_from_plan, preserves existing list if recalculation fails.
+- UI refreshes the specific meal card with new title, ingredients, recipe steps, and calorie/portion display.
+
+6) Hugging Face Fallback Generator
+- Trigger: “Generate with HuggingFace 🤗” calls generate_plan_hf.
+- Model: flax-community/t5-recipe-generation loaded lazily (transformers[flax] + jax required).
+- Flow: builds ingredient prompts per meal (_hf_build_items_prompt), parses text output into meal dicts (hf_parse_recipe_text), applies the same fixed calorie model, and aggregates a grocery list (concatenated quantities).
+
+7) Grocery List Generation & Editing
+- Source: aggregate_grocery_list_from_plan collects all meal ingredients (excluding skipped/zero-portion meals), assigns heuristic categories (Produce, Dairy, Meat, Pantry, etc.), and sorts by category/item.
+- UI: grocery-list-container groups items by category, each with a remove button; users can add custom items (name/quantity/category) via a form; list stored in grocery-list-store.
+- Order CTA: “Order Groceries” button exists as a premium-gated entry point (opens premium modal).
+
+8) Pricing Integration (Migros)
+- Token: fetch_migros_token uses env token or guest endpoint; MIGROS_DEFAULT_HEADERS configure user agent.
+- Node helper: run_node_migros_helper executes migros_price_helper.js with a payload of ingredient names; bulk_search_migros_via_node caches token and returns results.
+- Fallback: search_migros_product posts to Migros search API and extracts price/energy data.
+- Enrichment: enrich_plan_with_migros attaches matched items, estimated total, currency, and metadata to plan_data (capped to ~20 unique ingredient queries).
+
+9) PDF Export
+- Button: “Download PDF Summary” triggers download_pdf.
+- Generation: generate_meal_plan_pdf builds a multi-page PDF (ReportLab) with per-day tables (meal names, portions, calories) and a categorized grocery list; outputs bytes via dcc.send_bytes for download.
+
+10) Chat Assistant (CULINAIRE Chat)
+- Agent: llama-index ReActAgent with LlamaOpenAI (gpt-4o-mini) and a web_search FunctionTool (DuckDuckGo).
+- Context: build_user_context merges live form values, saved profile, latest plan digest (plan_digest/plan_full_context), and optional Migros pricing summary.
+- Behaviour: concise answers with source URLs for searched content; premium-gated—non-premium users are prompted to upgrade before chatting.
+
+11) Premium Access Flow
+- Modal: “Go Premium” button opens a modal describing benefits; “Verify student email” accepts only epfl.ch addresses to set premium_status.
+- Gating: chat send, like/save recipe buttons, and order-groceries button all open the premium modal when not premium. Premium badge text updates when verified.
+
+12) Data Privacy & Clearing
+- clear_user_data deletes user row by email; UI button “Clear my data” returns success/failure alerts. Last plan JSON stored per user for continuity but removable via delete.
+
+13) Robustness & Utilities
+- JSON handling: extract_json_block, clean_json_text, parse_text_meal_plan (lenient text-to-structured parser) to recover malformed LLM outputs.
+- Ingredient utilities: format_recipe_with_line_breaks prettifies numbered steps; _hf_* helpers build ingredient pools respecting diet/restrictions.
+- Portion parsing: callbacks reconstruct per-day/meal portion dicts from 21 form inputs; defaults to 1 when unspecified, supports explicit 0 (skip).
+- Debug/logging: numerous stdout/stderr prints for callbacks, parsing, and generation flows to aid troubleshooting.
+
+14) Deployment
+- Server: app.run_server(host="0.0.0.0", port env PORT or 8050). External styles: Bootstrap theme FLATLY. GA snippet present but disabled.

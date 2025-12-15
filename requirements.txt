@@ -12,8 +12,8 @@ reportlab>=4.0,<5
 llama-index-core>=0.10.20,<0.11
 llama-index-llms-openai>=0.1.20,<0.2
 
-# Only needed if you click "Generate with HuggingFace 🤗"
-#transformers>=4.39,<4.42
-#torch==2.2.2
+# Required if you click "Generate with HuggingFace 🤗"
+transformers[flax]>=4.44,<5
+jax[cpu]>=0.4.30,<0.5
 
 numpy>=1.24,<2

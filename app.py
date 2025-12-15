@@ -395,17 +395,195 @@ client = OpenAI(
     default_headers=default_headers,
 )
 
+HF_MODEL_NAME = "flax-community/t5-recipe-generation"
+HF_PREFIX = "items: "
+HF_GENERATION_KWARGS = {
+    "max_length": 512,
+    "min_length": 64,
+    "no_repeat_ngram_size": 3,
+    "do_sample": True,
+    "top_k": 60,
+    "top_p": 0.95,
+}
+HF_TOKEN_MAP = {"<sep>": "--", "<section>": "\n"}
+
+
+def _hf_skip_special_tokens(text, special_tokens):
+    for token in special_tokens:
+        text = text.replace(token, "")
+    return text
+
+
+def _hf_target_postprocessing(texts, special_tokens):
+    if not isinstance(texts, list):
+        texts = [texts]
+
+    new_texts = []
+    for text in texts:
+        cleaned = _hf_skip_special_tokens(text, special_tokens)
+        for k, v in HF_TOKEN_MAP.items():
+            cleaned = cleaned.replace(k, v)
+        new_texts.append(cleaned)
+
+    return new_texts
+
+
 @lru_cache(maxsize=1)
 def get_hf_pipeline():
-    """Lazy-load the Hugging Face recipe generator pipeline."""
+    """Lazy-load the Hugging Face recipe generator (Flax T5) tokenizer/model."""
     try:
-        from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+        from transformers import AutoTokenizer, FlaxAutoModelForSeq2SeqLM
     except ImportError:
-        raise RuntimeError("transformers is required for the HuggingFace model. Please pip install transformers.")
+        raise RuntimeError("transformers[flax] (with jax/flax) is required for the HuggingFace model. Please pip install transformers[flax].")
 
-    tokenizer = AutoTokenizer.from_pretrained("Ashikan/dut-recipe-generator")
-    model = AutoModelForCausalLM.from_pretrained("Ashikan/dut-recipe-generator")
-    return pipeline("text-generation", model=model, tokenizer=tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(HF_MODEL_NAME, use_fast=True)
+    model = FlaxAutoModelForSeq2SeqLM.from_pretrained(HF_MODEL_NAME)
+    return tokenizer, model
+
+
+def generate_with_hf_t5(prompt: str) -> str:
+    """Run the Flax T5 model and return cleaned text output."""
+    tokenizer, model = get_hf_pipeline()
+    try:
+        import jax
+    except ImportError as exc:
+        raise RuntimeError("jax is required for the HuggingFace Flax model. Please pip install jax.") from exc
+
+    inputs = tokenizer(
+        HF_PREFIX + prompt,
+        max_length=512,
+        padding="max_length",
+        truncation=True,
+        return_tensors="jax",
+    )
+
+    prng_key = jax.random.PRNGKey(int(datetime.utcnow().timestamp()))
+    output_ids = model.generate(
+        input_ids=inputs.input_ids,
+        attention_mask=inputs.attention_mask,
+        prng_key=prng_key,
+        pad_token_id=tokenizer.pad_token_id,
+        **HF_GENERATION_KWARGS,
+    )
+    decoded = tokenizer.batch_decode(output_ids.sequences, skip_special_tokens=False)
+    processed = _hf_target_postprocessing(decoded, tokenizer.all_special_tokens)
+    return processed[0] if processed else ""
+
+
+def _hf_split_list(text):
+    if not text:
+        return []
+    parts = re.split(r"[;,]", str(text))
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def _hf_ingredient_pool(meal_type: str, diet: str) -> list:
+    base_pool = {
+        "breakfast": ["oats", "banana", "berries", "honey", "almonds", "yogurt", "chia seeds", "milk"],
+        "lunch": ["chicken breast", "quinoa", "spinach", "olive oil", "garlic", "tomato", "bell pepper", "onion"],
+        "dinner": ["salmon", "sweet potato", "broccoli", "olive oil", "lemon", "garlic", "rice", "green beans"],
+    }.get(meal_type, ["olive oil", "garlic", "onion", "tomato", "rice", "spinach"])
+
+    diet_lower = (diet or "").lower()
+    pool = []
+    for item in base_pool:
+        lower = item.lower()
+        if "vegan" in diet_lower:
+            if any(x in lower for x in ["yogurt", "milk", "cheese", "egg", "honey", "salmon", "chicken"]):
+                continue
+        if "vegetarian" in diet_lower:
+            if any(x in lower for x in ["salmon", "chicken", "beef", "pork", "shrimp", "turkey"]):
+                continue
+        pool.append(item)
+
+    if "vegan" in diet_lower or "vegetarian" in diet_lower:
+        pool.extend(["tofu", "chickpeas", "lentils", "tempeh", "black beans"])
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_pool = []
+    for item in pool:
+        key = item.lower()
+        if key not in seen:
+            seen.add(key)
+            unique_pool.append(item)
+    return unique_pool or ["vegetables", "olive oil", "herbs"]
+
+
+def _hf_build_items_prompt(meal_type: str, diet: str, cravings: str, avoid: str) -> str:
+    if isinstance(cravings, list):
+        cravings = ", ".join(cravings)
+    if isinstance(avoid, list):
+        avoid = ", ".join(avoid)
+
+    cravings_list = _hf_split_list(cravings)
+    avoid_list = [a.lower() for a in _hf_split_list(avoid)]
+    pool = _hf_ingredient_pool(meal_type, diet)
+
+    items = []
+    # Start with cravings (if any)
+    for item in cravings_list:
+        if item.lower() not in avoid_list:
+            items.append(item)
+
+    # Fill the rest from pool
+    for item in pool:
+        if item.lower() in avoid_list:
+            continue
+        items.append(item)
+        if len(items) >= 10:
+            break
+
+    if not items:
+        items = pool[:8]
+
+    return ", ".join(items)
+
+
+def hf_parse_recipe_text(text: str) -> dict:
+    """Parse the T5 recipe text into title/ingredients/directions."""
+    result = {"title": "Chef's choice", "ingredients": {}, "directions": text or ""}
+    if not text:
+        return result
+
+    normalized = text.replace("\r\n", "\n")
+
+    title_match = re.search(r"(?i)title:\s*(.*)", normalized)
+    if title_match:
+        candidate = title_match.group(1).strip(" :-")
+        if candidate:
+            result["title"] = candidate
+
+    ing_match = re.search(r"(?i)ingredients:\s*(.*?)(?:\n\s*(directions:|title:)|$)", normalized, re.S)
+    if ing_match:
+        raw_ing = ing_match.group(1).strip()
+        pieces = re.split(r"--|,|\n", raw_ing)
+        ing_dict = {}
+        for piece in pieces:
+            item = piece.strip(" .;-")
+            if not item:
+                continue
+            parts = item.split()
+            qty = ""
+            name = item
+            if len(parts) > 1 and re.match(r"^[\d/]+", parts[0]):
+                qty = parts[0]
+                name = " ".join(parts[1:]).strip() or item
+            if name:
+                ing_dict[name] = qty or "some"
+        if ing_dict:
+            result["ingredients"] = ing_dict
+
+    dir_match = re.search(r"(?i)directions:\s*(.*)", normalized, re.S)
+    if dir_match:
+        raw_dir = dir_match.group(1).strip()
+        steps = [s.strip(" .-") for s in re.split(r"--|\n|\r", raw_dir) if s.strip()]
+        if steps:
+            result["directions"] = " ".join(f"{i+1}. {step}" for i, step in enumerate(steps))
+        else:
+            result["directions"] = raw_dir
+
+    return result
 
 def extract_json_block(raw_text: str) -> str:
     """Try to pull a JSON object out of a model response."""
@@ -1695,112 +1873,90 @@ def generate_plan_hf(n, weight, activity_hours, goals, budget, calories, restric
     )
     
     # Use simple text format - SHORTENED prompt to avoid truncation
-    user_prompt = f"""Create a 7-day meal plan.
-
-User: {calories} cal/day, {diet} diet{f", avoid {avoid_ingredients}" if avoid_ingredients else ""}{f", likes {cravings}" if cravings else ""}
-
-Format:
-DAY: Monday
-BREAKFAST: Meal Name
-  Calories: {base_calories['breakfast']}
-  Ingredients: Item1 qty1, Item2 qty2
-  Recipe: 1. Step one. 2. Step two. 3. Step three.
-LUNCH: Meal Name
-  Calories: {base_calories['lunch']}
-  Ingredients: Item1 qty1, Item2 qty2
-  Recipe: 1. Step one. 2. Step two. 3. Step three.
-DINNER: Meal Name
-  Calories: {base_calories['dinner']}
-  Ingredients: Item1 qty1, Item2 qty2
-  Recipe: 1. Step one. 2. Step two. 3. Step three.
-
-Repeat for all 7 days: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday."""
     raw_content = ""
-    json_text = ""
     plan_payload = None
     try:
-        pipe = get_hf_pipeline()
-        tokenizer = pipe.tokenizer
-        # Check for repetitive output and stop early if detected
-        raw_output = pipe(
-            user_prompt,
-            max_new_tokens=1500,  # Reduced further to prevent excessive generation
-            temperature=0.9,  # Higher temperature for more variety
-            do_sample=True,
-            truncation=True,
-            return_full_text=False,
-            pad_token_id=tokenizer.eos_token_id if tokenizer.eos_token_id else None,
-            repetition_penalty=2.0,  # Strong repetition penalty to prevent loops
-            no_repeat_ngram_size=2,  # Prevent repeating 2-grams
-        )
-        
-        # Handle pipeline output
-        import sys
-        if isinstance(raw_output, list) and len(raw_output) > 0:
-            raw_output = raw_output[0]
-            print(f"🔍 DEBUG: Extracted from list, type: {type(raw_output)}", file=sys.stderr, flush=True)
-        
-        if isinstance(raw_output, dict):
-            raw_content = raw_output.get("generated_text", "")
-            print(f"🔍 DEBUG: Got generated_text from dict, length: {len(raw_content)}", file=sys.stderr, flush=True)
-        elif isinstance(raw_output, str):
-            raw_content = raw_output
-            print(f"🔍 DEBUG: Got string output, length: {len(raw_content)}", file=sys.stderr, flush=True)
-        else:
-            raw_content = str(raw_output) if raw_output else ""
-            print(f"🔍 DEBUG: Converted to string, length: {len(raw_content)}", file=sys.stderr, flush=True)
-        
-        # If return_full_text=True, we need to extract just the generated part (after the prompt)
-        # The generated_text includes the prompt, so we need to remove it
-        if user_prompt in raw_content:
-            # Find where the prompt ends and extract only the generated part
-            prompt_end = raw_content.find(user_prompt) + len(user_prompt)
-            raw_content = raw_content[prompt_end:].strip()
-            print(f"🔍 DEBUG: Extracted generated part (after prompt), length: {len(raw_content)}", file=sys.stderr, flush=True)
-        print(f"🔍 DEBUG: Raw output length: {len(raw_content)} chars", file=sys.stderr, flush=True)
-        print(f"🔍 DEBUG: First 500 chars: {raw_content[:500]}", file=sys.stderr, flush=True)
-        print(f"🔍 DEBUG: Last 500 chars: {raw_content[-500:]}", file=sys.stderr, flush=True)
-        
-        # Check for repetitive output (model stuck in loop)
-        if raw_content and len(raw_content) > 100:
-            # Check if output is mostly repetitive
-            words = raw_content.split()
-            if len(words) > 10:
-                unique_words = len(set(words[:50]))  # Check first 50 words
-                if unique_words < 5:  # Less than 5 unique words in first 50 = repetitive
-                    raise ValueError(f"HuggingFace model generated repetitive output (only {unique_words} unique words in first 50). The model may not be suitable for this task. Please use the 'Generate My Weekly Plan' button instead.")
-        
-        if not raw_content or not raw_content.strip():
-            raise ValueError("HuggingFace model returned empty output.")
-        
-        # Parse the text format instead of JSON
-        print(f"🔍 DEBUG: Parsing text format meal plan...", file=sys.stderr, flush=True)
-        print(f"🔍 DEBUG: Raw content (first 2000 chars):\n{raw_content[:2000]}", file=sys.stderr, flush=True)
-        plan = parse_text_meal_plan(raw_content, base_calories)
-        print(f"🔍 DEBUG: Successfully parsed! Found {len(plan.get('meal_plan', []))} days", file=sys.stderr, flush=True)
-        if len(plan.get('meal_plan', [])) == 0:
-            print(f"⚠️ WARNING: Parser found 0 days!", file=sys.stderr, flush=True)
-            print(f"⚠️ WARNING: Full raw content:\n{raw_content}", file=sys.stderr, flush=True)
-            print(f"⚠️ WARNING: Plan structure: {plan}", file=sys.stderr, flush=True)
-        
-        # Convert to JSON for compatibility
-        json_text = json.dumps(plan)
+        print(f"🔍 DEBUG: Using HF model {HF_MODEL_NAME} with items prompt format", file=sys.stderr, flush=True)
+        grocery_map = {}
+        meal_plan = []
+
+        for day in days_list:
+            day_meals = {}
+            for meal_type in ["breakfast", "lunch", "dinner"]:
+                portion_key = f"{day}_{meal_type}"
+                portion_count = portions.get(portion_key, 1)
+                if portion_count == 0:
+                    day_meals[meal_type] = {
+                        "meal": "Skipped",
+                        "calories": 0,
+                        "ingredients": {},
+                        "recipe": "No meal planned"
+                    }
+                    continue
+
+                items_prompt = _hf_build_items_prompt(meal_type, diet, cravings, avoid_ingredients)
+                try:
+                    raw_content = generate_with_hf_t5(items_prompt)
+                except Exception as model_err:
+                    print(f"⚠️ HF generation failed for {day} {meal_type}: {model_err}", file=sys.stderr, flush=True)
+                    raw_content = ""
+                    parsed = {"title": f"{meal_type.capitalize()} idea", "ingredients": {}, "directions": ""}
+                else:
+                    parsed = hf_parse_recipe_text(raw_content)
+                meal_dict = {
+                    "meal": parsed.get("title") or f"{meal_type.capitalize()} recipe",
+                    "ingredients": parsed.get("ingredients") or {},
+                    "calories": base_calories[meal_type],
+                    "recipe": parsed.get("directions") or raw_content,
+                }
+                day_meals[meal_type] = meal_dict
+
+                # Build grocery aggregation
+                for ing_name, qty in meal_dict["ingredients"].items():
+                    if ing_name in grocery_map:
+                        grocery_map[ing_name] = f"{grocery_map[ing_name]} + {qty}"
+                    else:
+                        grocery_map[ing_name] = qty
+
+                # Debug logging
+                print(f"🔍 HF {day} {meal_type}: prompt items -> {items_prompt}", file=sys.stderr, flush=True)
+                print(f"🔍 HF {day} {meal_type}: raw output len {len(raw_content)}", file=sys.stderr, flush=True)
+
+            meal_plan.append({"day": day, "meals": day_meals})
+
+        grocery_list = [{"item": name, "quantity": qty} for name, qty in grocery_map.items()]
+        # Estimate daily calories based on base targets and portions
+        day_totals = []
+        for day_entry in meal_plan:
+            total = 0
+            for meal_type in ["breakfast", "lunch", "dinner"]:
+                portion_key = f"{day_entry['day']}_{meal_type}"
+                portion_count = portions.get(portion_key, 1)
+                total += base_calories[meal_type] * (portion_count if portion_count else 0)
+            day_totals.append(total)
+
+        summary = {
+            "average_daily_calories": round(sum(day_totals) / len(day_totals)) if day_totals else calories,
+            "estimated_weekly_cost": "CHF ?",
+            "nutrition_focus": diet or "balanced",
+        }
+
+        plan = {"meal_plan": meal_plan, "grocery_list": grocery_list, "summary": summary}
         # Fix calories in code - override LLM's calorie values with correct per-portion targets
         plan = fix_calories_in_plan(plan, calories, portions)
-        # Update the JSON payload with corrected calories
         plan_payload = json.dumps(plan)
         return render_plan_view(plan, calories, portions), plan_payload
     except Exception as e:
         return html.Div(
             [
                 html.P(f"Error using HuggingFace model: {type(e).__name__} – {e}", style={"color": "red", "fontWeight": "bold"}),
-                html.P("⚠️ The HuggingFace model sometimes generates invalid JSON. Try the 'Generate My Weekly Plan' button instead for better results!", style={"color": "#856404", "backgroundColor": "#fff3cd", "padding": "10px", "borderRadius": "5px", "marginTop": "10px"}),
+                html.P("⚠️ The HuggingFace model sometimes generates invalid output. Try the 'Generate My Weekly Plan' button instead for better results!", style={"color": "#856404", "backgroundColor": "#fff3cd", "padding": "10px", "borderRadius": "5px", "marginTop": "10px"}),
                 html.Details([
-                    html.Summary("Show raw output", style={"cursor": "pointer", "marginTop": "10px"}),
+                    html.Summary("Show last raw output", style={"cursor": "pointer", "marginTop": "10px"}),
                     html.Pre((raw_content or "")[:800], style={"whiteSpace": "pre-wrap", "background": "#f8f9fa", "padding": "10px"}),
                 ]),
             ]
-        ), plan_payload or json_text or raw_content
+        ), plan_payload or raw_content
 
 
 # -------------------- CHATBOT (LLamaIndex Agent) --------------------
@@ -2295,6 +2451,7 @@ def chat_with_agent(user_message, history, plan_data, email, form_fields):
     Output("latest_plan_data", "data"),
     Output("plan-data-store", "data"),
     Input("generate", "n_clicks"),
+    Input("generate_hf", "n_clicks"),
     State("body_weight", "value"),
     State("activity_hours", "value"),
     State("goals", "value"),
@@ -2313,24 +2470,23 @@ def chat_with_agent(user_message, history, plan_data, email, form_fields):
     State("cuisines", "value"),
     State({"type": "portion", "day": ALL, "meal": ALL}, "value"),
 )
-def handle_generate_plan(n_clicks, weight, activity_hours, goals, budget, calories, restrictions, diet, location, budget_ignore, calories_ignore, email, name, avoid_ingredients, cravings, complexity, cuisines, portion_values):
+def handle_generate_plan(n_clicks, n_clicks_hf, weight, activity_hours, goals, budget, calories, restrictions, diet, location, budget_ignore, calories_ignore, email, name, avoid_ingredients, cravings, complexity, cuisines, portion_values):
     print(f"\n{'='*60}")
     print(f"🔥 GENERATE CALLBACK FIRED!")
-    print(f"   n_clicks={n_clicks} (type: {type(n_clicks)})")
+    print(f"   n_clicks={n_clicks} (type: {type(n_clicks)}) | n_clicks_hf={n_clicks_hf}", flush=True)
     print(f"   weight={weight}, activity_hours={activity_hours}")
     print(f"   goals={goals}")
     print(f"{'='*60}\n")
     
-    if n_clicks is None:
-        print("   ❌ PreventUpdate - n_clicks is None")
-        raise PreventUpdate
-    
-    if (n_clicks or 0) == 0:
-        print("   ❌ PreventUpdate - n_clicks is zero")
-        raise PreventUpdate
-
     ctx = callback_context
-    trigger = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else None
+    if not ctx.triggered:
+        print("   ❌ PreventUpdate - no trigger found")
+        raise PreventUpdate
+    trigger = ctx.triggered[0]["prop_id"].split(".")[0]
+    clicked_value = n_clicks if trigger == "generate" else n_clicks_hf if trigger == "generate_hf" else None
+    if not clicked_value:
+        print("   ❌ PreventUpdate - click value missing or zero")
+        raise PreventUpdate
     print(f"   ✅ Trigger: {trigger}")
 
     budget_value = budget if "ignore" not in (budget_ignore or []) else "Not specified"
@@ -2361,30 +2517,46 @@ def handle_generate_plan(n_clicks, weight, activity_hours, goals, budget, calori
                 portions[f"{day}_{meal}"] = 1
     
     print(f"   📊 Parsed portions: {portions}")
-
-    # HuggingFace feature disabled - model not suitable for this task
-    # if trigger == "generate_hf":
-    #     ... (removed)
-
-    plan_view, plan_raw = generate_plan(
-        n_clicks,
-        weight,
-        activity_hours,
-        goals or [],
-        budget_value,
-        calorie_target,
-        restrictions or "None",
-        diet,
-        location or "Not specified",
-        avoid_ingredients or "",
-        cravings or "",
-        complexity or "medium",
-        cuisines or [],
-        portions,
-    )
+    
+    if trigger == "generate_hf":
+        plan_view, plan_raw = generate_plan_hf(
+            n_clicks_hf,
+            weight,
+            activity_hours,
+            goals or [],
+            budget_value,
+            calorie_target,
+            restrictions or "None",
+            diet,
+            location or "Not specified",
+            avoid_ingredients or "",
+            cravings or "",
+            complexity or "medium",
+            cuisines or [],
+            portions,
+        )
+        provider = "huggingface"
+    else:
+        plan_view, plan_raw = generate_plan(
+            n_clicks,
+            weight,
+            activity_hours,
+            goals or [],
+            budget_value,
+            calorie_target,
+            restrictions or "None",
+            diet,
+            location or "Not specified",
+            avoid_ingredients or "",
+            cravings or "",
+            complexity or "medium",
+            cuisines or [],
+            portions,
+        )
+        provider = "openrouter"
     plan_data = {
         "raw_json": plan_raw,
-        "provider": "openrouter",
+        "provider": provider,
         "generated_at": datetime.utcnow().isoformat(),
         "email": email,
         "name": name,
