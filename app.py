@@ -2772,14 +2772,9 @@ def populate_profile_fields(n_clicks, email):
     prevent_initial_call=True,
 )
 def handle_chat(n_clicks, user_message, history, plan_data, email, weight, budget, calories, activity_hours, diet, location, goals, restrictions, budget_ignore, calories_ignore, premium_data):
-    """Handle chat interactions; require premium status to chat."""
+    """Handle chat interactions; chat is available to all users (no premium gate)."""
     if not n_clicks:
         raise PreventUpdate
-
-    premium_data = premium_data or {}
-    if not premium_data.get("is_premium"):
-        # Open modal to prompt upgrade
-        return no_update, no_update, True, no_update
 
     if not user_message or not str(user_message).strip():
         raise PreventUpdate
@@ -2810,7 +2805,7 @@ def handle_chat(n_clicks, user_message, history, plan_data, email, weight, budge
     history.append({"role": "assistant", "content": agent_reply})
     return render_chat(history), history, False, ""
 
-# Chat features gated behind premium remain for other entry points below.
+# Premium gating remains for other features (likes, ordering), but chat is open to everyone.
 
 
 # -------------------- PROFILE SUMMARY FOR RECIPES TAB --------------------
